@@ -27,8 +27,13 @@
 (require 'subr-x)
 
 (declare-function nucleo-completion-candidates "nucleo-completion-module")
-(declare-function url-copy-file "url-handlers")
-(defvar url-show-status)
+(declare-function mm-destroy-parts "mm-decode")
+(declare-function mm-dissect-buffer "mm-decode")
+(declare-function mm-save-part-to-file "mm-decode")
+(declare-function url-retrieve-synchronously "url")
+(defvar mm-attachment-file-modes)
+(defvar url-http-codes)
+(defvar url-http-response-status)
 
 (defgroup nucleo-completion nil
   "Nucleo-backed fuzzy completion style."
@@ -479,8 +484,28 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
 (defun nucleo-completion--download-file (url file)
   "Download URL to FILE, replacing FILE if it exists."
   (require 'url)
-  (let ((url-show-status nil))
-    (url-copy-file url file t)))
+  (require 'mm-decode)
+  (let ((buffer (url-retrieve-synchronously url t t)))
+    (unless buffer
+      (error "Failed to download %s" url))
+    (unwind-protect
+        (with-current-buffer buffer
+          (let ((status (and (boundp 'url-http-response-status)
+                             url-http-response-status)))
+            (unless (or (not status)
+                        (and (>= status 200) (< status 300))
+                        (= status 304))
+              (let ((desc (and (boundp 'url-http-codes)
+                               (nth 2 (assq status url-http-codes)))))
+                (error "Failed to download %s: HTTP %s%s"
+                       url status (if desc (format " %s" desc) "")))))
+          (let ((handle (mm-dissect-buffer t))
+                (mm-attachment-file-modes (default-file-modes)))
+            (unwind-protect
+                (mm-save-part-to-file handle file)
+              (mm-destroy-parts handle))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (defun nucleo-completion--sha256-from-file (file)
   "Return the first SHA256 digest found in FILE."

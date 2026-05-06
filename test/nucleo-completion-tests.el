@@ -131,6 +131,26 @@ populated when RETURN-ALL-SCORES is non-nil."
               "aarch64-apple-darwin")
              "https://github.com/example/repo/releases/download/v1.2.3/nucleo-completion-module-aarch64-apple-darwin.dylib"))))
 
+(ert-deftest nucleo-completion-download-file-reports-http-error-test ()
+  (let ((buffer (generate-new-buffer " *nucleo-completion-http-error*"))
+        (destination (make-temp-file "nucleo-completion-download-")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq-local url-http-response-status 404)
+            (insert "Not found"))
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (lambda (_url &rest _args)
+                       buffer)))
+            (should-error
+             (nucleo-completion--download-file
+              "https://example.invalid/missing.sha256" destination)
+             :type 'error)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (when (file-exists-p destination)
+        (delete-file destination)))))
+
 (ert-deftest nucleo-completion-install-module-downloads-and-verifies-test ()
   (let* ((root (make-temp-file "nucleo-completion-test-" t))
          (nucleo-completion-module-directory
