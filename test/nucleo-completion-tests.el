@@ -87,9 +87,12 @@ populated when RETURN-ALL-SCORES is non-nil."
 
 (ert-deftest nucleo-completion-module-candidates-test ()
   (let* ((nucleo-completion--directory "/tmp/nucleo-completion/")
+         (nucleo-completion-module-directory "/tmp/nucleo-modules/")
          (system-type 'gnu/linux)
          (system-configuration "x86_64-pc-linux-gnu")
          (candidates (nucleo-completion--module-candidates)))
+    (should (member "/tmp/nucleo-modules/v0.1.6/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+                    candidates))
     (should (member "/tmp/nucleo-completion/bin/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
                     candidates))
     (should (member "/tmp/nucleo-completion/bin/x86_64-unknown-linux-musl/libnucleo_completion_module.so"
@@ -98,6 +101,106 @@ populated when RETURN-ALL-SCORES is non-nil."
                     candidates))
     (should (member "/tmp/nucleo-completion/target/debug/libnucleo_completion_module.so"
                     candidates))))
+
+(ert-deftest nucleo-completion-module-install-triple-test ()
+  (let ((system-type 'windows-nt)
+        (system-configuration "x86_64-w64-mingw32"))
+    (should (equal (nucleo-completion--module-install-triple)
+                   "x86_64-pc-windows-msvc")))
+  (let ((system-type 'gnu/linux)
+        (system-configuration "aarch64-unknown-linux-gnu"))
+    (should-not (nucleo-completion--module-install-triple))))
+
+(ert-deftest nucleo-completion-module-asset-url-test ()
+  (let ((system-type 'gnu/linux)
+        (nucleo-completion-module-release-repository "example/repo")
+        (nucleo-completion-module-release-tag nil))
+    (should (equal
+             (nucleo-completion--module-asset-url
+              "x86_64-unknown-linux-gnu")
+             "https://github.com/example/repo/releases/latest/download/nucleo-completion-module-x86_64-unknown-linux-gnu.so"))
+    (should (equal
+             (nucleo-completion--module-asset-url
+              "x86_64-unknown-linux-gnu" t)
+             "https://github.com/example/repo/releases/latest/download/nucleo-completion-module-x86_64-unknown-linux-gnu.so.sha256")))
+  (let ((system-type 'darwin)
+        (nucleo-completion-module-release-repository "example/repo")
+        (nucleo-completion-module-release-tag "v1.2.3"))
+    (should (equal
+             (nucleo-completion--module-asset-url
+              "aarch64-apple-darwin")
+             "https://github.com/example/repo/releases/download/v1.2.3/nucleo-completion-module-aarch64-apple-darwin.dylib"))))
+
+(ert-deftest nucleo-completion-install-module-downloads-and-verifies-test ()
+  (let* ((root (make-temp-file "nucleo-completion-test-" t))
+         (nucleo-completion-module-directory
+          (expand-file-name "modules" root))
+         (system-type 'gnu/linux)
+         (system-configuration "x86_64-pc-linux-gnu")
+         (payload "module contents")
+         loaded
+         downloads)
+    (unwind-protect
+        (cl-letf (((symbol-function 'nucleo-completion--download-file)
+                   (lambda (url file)
+                     (push url downloads)
+                     (with-temp-file file
+                       (insert
+                        (if (string-suffix-p ".sha256" url)
+                            (concat (secure-hash 'sha256 payload) "  asset\n")
+                          payload)))))
+                  ((symbol-function 'nucleo-completion--dynamic-modules-supported-p)
+                   (lambda () t))
+                  ((symbol-function 'nucleo-completion--load-module)
+                   (lambda ()
+                     (setq loaded t)))
+                  ((symbol-function 'nucleo-completion--module-ready-p)
+                   (lambda () loaded))
+                  ((symbol-function 'yes-or-no-p)
+                   (lambda (_prompt)
+                     (error "install test should not prompt"))))
+          (let ((destination (nucleo-completion-install-module nil t)))
+            (should (equal (file-name-nondirectory destination)
+                           "libnucleo_completion_module.so"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents destination)
+                             (buffer-string))
+                           payload))
+            (should (= (length downloads) 2))))
+      (delete-directory root t))))
+
+(ert-deftest nucleo-completion-maybe-prompt-module-install-test ()
+  (let ((nucleo-completion-module-install-policy 'prompt)
+        (nucleo-completion--module-install-prompted nil)
+        called)
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil))
+              ((symbol-function 'nucleo-completion--module-install-triple)
+               (lambda () "x86_64-unknown-linux-gnu"))
+              ((symbol-function 'nucleo-completion-install-module)
+               (lambda (&rest _args)
+                 (setq called t))))
+      (let ((noninteractive nil))
+        (nucleo-completion--maybe-prompt-module-install))
+      (should called)
+      (should nucleo-completion--module-install-prompted))))
+
+(ert-deftest nucleo-completion-maybe-prompt-skips-explicit-install-command-test ()
+  (let ((nucleo-completion-module-install-policy 'prompt)
+        (nucleo-completion--module-install-prompted nil)
+        called)
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil))
+              ((symbol-function 'nucleo-completion--module-install-triple)
+               (lambda () "x86_64-unknown-linux-gnu"))
+              ((symbol-function 'nucleo-completion-install-module)
+               (lambda (&rest _args)
+                 (setq called t))))
+      (let ((noninteractive nil)
+            (this-command 'nucleo-completion-install-module))
+        (nucleo-completion--maybe-prompt-module-install))
+      (should-not called)
+      (should-not nucleo-completion--module-install-prompted))))
 
 (ert-deftest nucleo-completion-no-dynamic-module-support-test ()
   (let ((nucleo-completion-module-load-errors 'stale))
@@ -145,7 +248,11 @@ populated when RETURN-ALL-SCORES is non-nil."
                       nucleo-completion-highlight-score-bands
                       nucleo-completion-high-score-ratio
                       nucleo-completion-high-score-emphasis
-                      nucleo-completion-report-module-load-errors))
+                      nucleo-completion-report-module-load-errors
+                      nucleo-completion-module-directory
+                      nucleo-completion-module-release-repository
+                      nucleo-completion-module-release-tag
+                      nucleo-completion-module-install-policy))
       (should (member (list symbol 'custom-variable) members)))))
 
 (ert-deftest nucleo-completion-highlight-limit-sanitizes-test ()

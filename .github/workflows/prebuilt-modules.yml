@@ -5,6 +5,10 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: GitHub Release tag to upload assets to, for example v0.1.6
+        required: true
 
 jobs:
   build:
@@ -17,15 +21,19 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             library: libnucleo_completion_module.so
+            extension: so
           - os: macos-15-intel
             target: x86_64-apple-darwin
             library: libnucleo_completion_module.dylib
+            extension: dylib
           - os: macos-15
             target: aarch64-apple-darwin
             library: libnucleo_completion_module.dylib
+            extension: dylib
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             library: nucleo_completion_module.dll
+            extension: dll
 
     steps:
       - uses: actions/checkout@v4
@@ -41,18 +49,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist/bin/${{ matrix.target }}
+          asset="nucleo-completion-module-${{ matrix.target }}.${{ matrix.extension }}"
+          mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.library }} \
-            dist/bin/${{ matrix.target }}/
+            "dist/${asset}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${asset}" > "dist/${asset}.sha256"
+          else
+            shasum -a 256 "dist/${asset}" > "dist/${asset}.sha256"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nucleo-completion-${{ matrix.target }}
-          path: dist
+          path: dist/*
 
-  commit-prebuilt-modules:
-    name: commit-prebuilt-modules
+  publish-release-assets:
+    name: publish-release-assets
     needs: build
     runs-on: ubuntu-latest
 
@@ -66,18 +80,16 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Commit modules to main
+      - name: Upload release assets
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p bin
-          cp -R artifacts/bin/. bin/
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add bin
-          if git diff --cached --quiet; then
-            echo "No prebuilt module changes."
-            exit 0
+          tag="${{ inputs.tag }}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes "Prebuilt nucleo-completion dynamic modules for $tag."
           fi
-          git commit -m "Update prebuilt modules"
-          git push
+          gh release upload "$tag" artifacts/* --clobber

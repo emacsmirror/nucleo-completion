@@ -27,6 +27,8 @@
 (require 'subr-x)
 
 (declare-function nucleo-completion-candidates "nucleo-completion-module")
+(declare-function url-copy-file "url-handlers")
+(defvar url-show-status)
 
 (defgroup nucleo-completion nil
   "Nucleo-backed fuzzy completion style."
@@ -172,6 +174,36 @@ Load failures are always saved in
   :type 'boolean
   :group 'nucleo-completion)
 
+(defcustom nucleo-completion-module-directory
+  (expand-file-name "nucleo-completion/modules/" user-emacs-directory)
+  "Directory where `nucleo-completion-install-module' stores modules."
+  :type 'directory
+  :group 'nucleo-completion)
+
+(defcustom nucleo-completion-module-release-repository
+  "kn66/nucleo-completion.el"
+  "GitHub OWNER/REPO used by `nucleo-completion-install-module'."
+  :type 'string
+  :group 'nucleo-completion)
+
+(defcustom nucleo-completion-module-release-tag "v0.1.6"
+  "GitHub Release tag used by `nucleo-completion-install-module'.
+When nil, the installer downloads from GitHub's latest release URL."
+  :type '(choice (const :tag "Latest release" nil)
+                 (string :tag "Release tag"))
+  :group 'nucleo-completion)
+
+(defcustom nucleo-completion-module-install-policy 'manual
+  "How to handle a missing Rust dynamic module.
+The value `manual' never prompts automatically; users can run
+`nucleo-completion-install-module' explicitly.  The value `prompt'
+asks once in interactive sessions when no module is available.  Nil
+never prompts."
+  :type '(choice (const :tag "Manual command only" manual)
+                 (const :tag "Ask once when loaded interactively" prompt)
+                 (const :tag "Never ask" nil))
+  :group 'nucleo-completion)
+
 (defface nucleo-completion-high-score-face
   '((t nil))
   "Face used for candidates in the high score band."
@@ -193,6 +225,16 @@ Load failures are always saved in
 (defvar nucleo-completion-module-load-errors nil
   "Dynamic module load failures from the last load attempt.
 Each entry has the form (FILE . MESSAGE).")
+
+(defvar nucleo-completion--module-install-prompted nil
+  "Non-nil after an automatic module install prompt has been considered.")
+
+(defconst nucleo-completion--prebuilt-release-triples
+  '("x86_64-unknown-linux-gnu"
+    "x86_64-apple-darwin"
+    "aarch64-apple-darwin"
+    "x86_64-pc-windows-msvc")
+  "Target triples currently published as GitHub Release assets.")
 
 (defvar nucleo-completion--regexp-cache nil
   "Cache for regexp expander results during one completion pass.")
@@ -276,6 +318,35 @@ function is a no-op."
             (expand-file-name (concat "bin/" triple) nucleo-completion--directory))
           (nucleo-completion--platform-triples)))
 
+(defun nucleo-completion--module-release-directory-name ()
+  "Return the local directory name for the configured module release."
+  (if (and (stringp nucleo-completion-module-release-tag)
+           (not (string-empty-p nucleo-completion-module-release-tag)))
+      nucleo-completion-module-release-tag
+    "latest"))
+
+(defun nucleo-completion--module-install-triple ()
+  "Return the current platform triple supported by release assets."
+  (cl-find-if
+   (lambda (triple)
+     (member triple nucleo-completion--prebuilt-release-triples))
+   (nucleo-completion--platform-triples)))
+
+(defun nucleo-completion--module-install-directory (triple)
+  "Return the local module install directory for TRIPLE."
+  (file-name-as-directory
+   (expand-file-name
+    triple
+    (expand-file-name
+     (nucleo-completion--module-release-directory-name)
+     (file-name-as-directory nucleo-completion-module-directory)))))
+
+(defun nucleo-completion--installed-module-directories ()
+  "Return installed module directories for the current platform."
+  (let ((triple (nucleo-completion--module-install-triple)))
+    (when triple
+      (list (nucleo-completion--module-install-directory triple)))))
+
 (defun nucleo-completion--dynamic-modules-supported-p ()
   "Return non-nil when this Emacs can load dynamic modules."
   (and (fboundp 'module-load)
@@ -293,6 +364,7 @@ function is a no-op."
              (mapcar (lambda (dir)
                        (expand-file-name library dir))
                      (append
+                      (nucleo-completion--installed-module-directories)
                       (nucleo-completion--prebuilt-module-directories)
                       (list nucleo-completion--directory
                             (expand-file-name "target/release" nucleo-completion--directory)
@@ -376,6 +448,63 @@ resolved from `nucleo-completion-long-candidate-threshold'."
           "; "))))))
 
 (nucleo-completion--load-module)
+
+(defun nucleo-completion--module-asset-extension ()
+  "Return the filename extension for the current platform module asset."
+  (file-name-extension (nucleo-completion--rust-library-name)))
+
+(defun nucleo-completion--module-asset-name (triple)
+  "Return the GitHub Release asset name for TRIPLE."
+  (format "nucleo-completion-module-%s.%s"
+          triple
+          (nucleo-completion--module-asset-extension)))
+
+(defun nucleo-completion--module-release-base-url ()
+  "Return the GitHub Release download base URL."
+  (format "https://github.com/%s/releases/%s"
+          nucleo-completion-module-release-repository
+          (if (and (stringp nucleo-completion-module-release-tag)
+                   (not (string-empty-p nucleo-completion-module-release-tag)))
+              (concat "download/" nucleo-completion-module-release-tag)
+            "latest/download")))
+
+(defun nucleo-completion--module-asset-url (triple &optional checksum)
+  "Return the GitHub Release URL for TRIPLE.
+When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
+  (concat (nucleo-completion--module-release-base-url)
+          "/"
+          (nucleo-completion--module-asset-name triple)
+          (when checksum ".sha256")))
+
+(defun nucleo-completion--download-file (url file)
+  "Download URL to FILE, replacing FILE if it exists."
+  (require 'url)
+  (let ((url-show-status nil))
+    (url-copy-file url file t)))
+
+(defun nucleo-completion--sha256-from-file (file)
+  "Return the first SHA256 digest found in FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (unless (re-search-forward "\\b[0-9a-fA-F]\\{64\\}\\b" nil t)
+      (error "No SHA256 digest found in %s" file))
+    (downcase (match-string 0))))
+
+(defun nucleo-completion--file-sha256 (file)
+  "Return the SHA256 digest of FILE contents."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (secure-hash 'sha256 (current-buffer))))
+
+(defun nucleo-completion--verify-sha256 (file checksum-file)
+  "Signal unless FILE matches the SHA256 digest in CHECKSUM-FILE."
+  (let ((expected (nucleo-completion--sha256-from-file checksum-file))
+        (actual (nucleo-completion--file-sha256 file)))
+    (unless (string= expected actual)
+      (error "SHA256 mismatch for %s: expected %s, got %s"
+             file expected actual))))
 
 (defun nucleo-completion--terms (pattern)
   "Split PATTERN into non-empty whitespace-separated terms."
@@ -594,6 +723,87 @@ six-argument adapter."
          (max-arity (and arity (cdr arity))))
     (or (eq max-arity 'many)
         (and (numberp max-arity) (>= max-arity 7)))))
+
+;;;###autoload
+(defun nucleo-completion-install-module (&optional force no-confirm)
+  "Download and install the Rust dynamic module for this platform.
+The module is downloaded from GitHub Releases only after
+confirmation, unless NO-CONFIRM is non-nil.  With prefix argument
+FORCE, replace an existing installed module."
+  (interactive "P")
+  (unless (nucleo-completion--dynamic-modules-supported-p)
+    (user-error "This Emacs was built without dynamic module support"))
+  (when (nucleo-completion--module-ready-p)
+    (user-error
+     "The nucleo-completion Rust module is already loaded; restart Emacs before replacing it"))
+  (let* ((triple (or (nucleo-completion--module-install-triple)
+                     (user-error
+                      "No prebuilt module is published for %s"
+                      system-configuration)))
+         (library (nucleo-completion--rust-library-name))
+         (directory (nucleo-completion--module-install-directory triple))
+         (destination (expand-file-name library directory))
+         (asset-url (nucleo-completion--module-asset-url triple))
+         (checksum-url (nucleo-completion--module-asset-url triple t)))
+    (when (and (file-exists-p destination)
+               (not force)
+               (not no-confirm))
+      (unless (yes-or-no-p
+               (format "Replace existing nucleo-completion module at %s? "
+                       destination))
+        (user-error "Module installation cancelled")))
+    (when (and (file-exists-p destination)
+               (not force)
+               no-confirm)
+      (user-error "Module already exists at %s" destination))
+    (unless no-confirm
+      (unless (yes-or-no-p
+               (format
+                "Download nucleo-completion module for %s from %s to %s? "
+                triple asset-url destination))
+        (user-error "Module installation cancelled")))
+    (let ((module-temp (make-temp-file "nucleo-completion-module-"))
+          (checksum-temp (make-temp-file "nucleo-completion-module-sha256-")))
+      (unwind-protect
+          (progn
+            (nucleo-completion--download-file checksum-url checksum-temp)
+            (nucleo-completion--download-file asset-url module-temp)
+            (nucleo-completion--verify-sha256 module-temp checksum-temp)
+            (make-directory directory t)
+            (rename-file module-temp destination t)
+            (nucleo-completion--load-module)
+            (if (nucleo-completion--module-ready-p)
+                (message "nucleo-completion: installed and loaded %s"
+                         destination)
+              (display-warning
+               'nucleo-completion
+               (format
+                "Installed %s, but it could not be loaded. Check load errors."
+                destination)
+               :warning))
+            destination)
+        (when (file-exists-p module-temp)
+          (delete-file module-temp))
+        (when (file-exists-p checksum-temp)
+          (delete-file checksum-temp))))))
+
+(defun nucleo-completion--maybe-prompt-module-install ()
+  "Prompt once to install the Rust module according to user policy."
+  (when (and (eq nucleo-completion-module-install-policy 'prompt)
+             (not nucleo-completion--module-install-prompted)
+             (not noninteractive)
+             (not (eq this-command 'nucleo-completion-install-module))
+             (not (nucleo-completion--module-ready-p))
+             (nucleo-completion--module-install-triple))
+    (setq nucleo-completion--module-install-prompted t)
+    (condition-case err
+        (nucleo-completion-install-module)
+      (error
+       (display-warning
+        'nucleo-completion
+        (format "Rust module installation failed: %s"
+                (error-message-string err))
+        :warning)))))
 
 (defconst nucleo-completion--max-unicode-codepoint #x10FFFF
   "Highest character that the Rust module can encode as UTF-8.
@@ -1186,6 +1396,8 @@ interrupt expensive scoring."
                         "Fuzzy completion backed by nucleo-matcher."))
   (put 'nucleo 'completion--adjust-metadata
        #'nucleo-completion-adjust-metadata))
+
+(nucleo-completion--maybe-prompt-module-install)
 
 (provide 'nucleo-completion)
 ;;; nucleo-completion.el ends here

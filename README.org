@@ -18,7 +18,13 @@ module using the ~nucleo-matcher~ crate.
 
 * Setup
 
-Install with ~package-vc~:
+Install from MELPA:
+
+#+begin_src text
+  M-x package-install RET nucleo-completion RET
+#+end_src
+
+Or install directly from the repository with ~package-vc~:
 
 #+begin_src emacs-lisp
   (package-vc-install
@@ -33,9 +39,9 @@ Then enable the completion style:
   (add-to-list 'completion-styles 'nucleo)
 #+end_src
 
-Prebuilt dynamic modules are committed under ~bin/<target-triple>/~ after the
-manual GitHub Actions workflow is run. This allows ~package-vc~ users to install
-the package without a Rust build environment.
+The package works without a Rust dynamic module by using a simple Emacs Lisp
+fallback matcher.  The fallback filters candidates but does not apply
+Rust-backed scoring or tie sorting.
 
 To use a local checkout, add the package directory to ~load-path~:
 
@@ -45,23 +51,31 @@ To use a local checkout, add the package directory to ~load-path~:
   (add-to-list 'completion-styles 'nucleo)
 #+end_src
 
-If a prebuilt module for your platform is bundled under ~bin/<target-triple>/~,
-~nucleo-completion~ loads it automatically.
+* Rust Dynamic Module
 
-Expected prebuilt layout:
+The MELPA package does not include prebuilt binary modules.  Users who want
+Rust-backed scoring can either download a prebuilt module for their own platform
+or build it locally.
+
+To download a prebuilt module from GitHub Releases, run:
 
 #+begin_src text
-  nucleo-completion.el/
-    nucleo-completion.el
-    bin/
-      x86_64-unknown-linux-gnu/
-        libnucleo_completion_module.so
-      x86_64-apple-darwin/
-        libnucleo_completion_module.dylib
-      aarch64-apple-darwin/
-        libnucleo_completion_module.dylib
-      x86_64-pc-windows-msvc/
-        nucleo_completion_module.dll
+  M-x nucleo-completion-install-module
+#+end_src
+
+This command downloads only the module for the current platform after an
+explicit confirmation prompt, verifies the published SHA256 checksum, stores the
+module under ~nucleo-completion-module-directory~, and then tries to load it.
+No download happens during package installation or by default when the package
+is loaded.  By default, the command downloads from the release tag configured by
+~nucleo-completion-module-release-tag~.  Set that option to nil to use GitHub's
+latest release URL instead.
+
+If you want ~nucleo-completion~ to ask once when loaded interactively and no
+module is available, set this before loading the package:
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-module-install-policy 'prompt)
 #+end_src
 
 Check whether the Rust module loaded with:
@@ -87,7 +101,7 @@ Emacs Lisp subsequence matcher, but Rust-backed scoring is not applied.
 The loader also checks ~target/release~ and ~target/debug~, so no extra
 ~load-path~ entry is required when building inside the package directory.
 
-* Prebuilt Modules
+* Prebuilt Release Assets
 
 This repository includes a GitHub Actions workflow at
 ~.github/workflows/prebuilt-modules.yml~. It builds release artifacts for:
@@ -97,13 +111,13 @@ This repository includes a GitHub Actions workflow at
 - ~aarch64-apple-darwin~ on ~macos-15~
 - ~x86_64-pc-windows-msvc~
 
-Run the workflow manually from the GitHub Actions page. It builds the modules,
-collects them under ~bin/<target-triple>/~, and commits the updated ~bin/~
-directory back to ~main~ when there are changes.
+Run the workflow manually from the GitHub Actions page with the release tag to
+publish. It builds the modules and uploads assets named
+~nucleo-completion-module-<target-triple>.<extension>~ plus matching
+~.sha256~ files to the selected GitHub Release.
 
 Linux binaries are sensitive to libc compatibility. For broad Linux
-distribution, consider adding a musl build and placing it under
-~bin/x86_64-unknown-linux-musl/~.
+distribution, consider adding a musl release asset.
 The loader also checks likely platform directories such as musl Linux,
 aarch64 Linux, and Windows GNU targets, but the workflow above only publishes
 the targets listed here unless the matrix is extended.
