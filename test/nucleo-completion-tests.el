@@ -91,7 +91,7 @@ populated when RETURN-ALL-SCORES is non-nil."
          (system-type 'gnu/linux)
          (system-configuration "x86_64-pc-linux-gnu")
          (candidates (nucleo-completion--module-candidates)))
-    (should (member "/tmp/nucleo-modules/v0.1.6/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+    (should (member "/tmp/nucleo-modules/latest/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
                     candidates))
     (should (member "/tmp/nucleo-completion/bin/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
                     candidates))

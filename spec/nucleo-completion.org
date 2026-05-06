@@ -94,8 +94,9 @@ load 時には network access を行わない。
 - ~nucleo-completion-module-release-repository~
    - prebuilt module を取得する GitHub repository。形式は ~OWNER/REPO~。
 - ~nucleo-completion-module-release-tag~
-   - prebuilt module を取得する GitHub Release tag。既定値は package release tag。
-   - nil の場合は GitHub の ~latest/download~ URL を使う。
+   - prebuilt module を取得する GitHub Release tag。
+   - 既定値は nil で、GitHub の ~latest/download~ URL を使う。
+   - 文字列を設定した場合は、その tag の release asset を使う。
 - ~nucleo-completion-module-install-policy~
    - 既定値は ~manual~ で、自動 prompt は出さない。
    - ~prompt~ の場合、interactive session で module がないときだけ一度確認 prompt を出す。

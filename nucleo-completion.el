@@ -191,7 +191,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defcustom nucleo-completion-module-release-tag "v0.1.6"
+(defcustom nucleo-completion-module-release-tag nil
   "GitHub Release tag used by `nucleo-completion-install-module'.
 When nil, the installer downloads from GitHub's latest release URL."
   :type '(choice (const :tag "Latest release" nil)
