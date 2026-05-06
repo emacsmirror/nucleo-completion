@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cmp::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
@@ -30,6 +31,20 @@ struct SortOptions {
     ties_by_length: bool,
     ties_alphabetically: bool,
     ignore_case: bool,
+}
+
+impl SortOptions {
+    fn from_lisp<'e>(
+        sort_ties_by_length: Value<'e>,
+        sort_ties_alphabetically: Value<'e>,
+        ignore_case: bool,
+    ) -> Self {
+        Self {
+            ties_by_length: sort_ties_by_length.is_not_nil(),
+            ties_alphabetically: sort_ties_alphabetically.is_not_nil(),
+            ignore_case,
+        }
+    }
 }
 
 fn case_matching(ignore_case: bool) -> CaseMatching {
@@ -98,64 +113,92 @@ fn score_items_with_sort(
     sort_options: SortOptions,
 ) -> Vec<ScoredIndex> {
     if texts.len() < PARALLEL_BATCH_SIZE {
-        return sort_scored(
-            with_matcher(|matcher| score_item_range(pattern, texts, 0, matcher)),
-            texts,
-            sort_options,
-        );
+        return sort_scored(score_items_serial(pattern, texts), texts, sort_options);
     }
 
     let pool = matcher_pool();
     let workers = parallel_worker_count(texts.len(), pool.len());
 
     if workers == 1 {
-        return sort_scored(
-            with_matcher(|matcher| score_item_range(pattern, texts, 0, matcher)),
-            texts,
-            sort_options,
-        );
+        return sort_scored(score_items_serial(pattern, texts), texts, sort_options);
     }
 
+    sort_scored(
+        score_items_parallel(pattern, texts, pool, workers),
+        texts,
+        sort_options,
+    )
+}
+
+fn score_items_serial(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
+    with_matcher(|matcher| score_item_range(pattern, texts, 0, matcher))
+}
+
+fn score_items_parallel(
+    pattern: &Pattern,
+    texts: &[String],
+    pool: &[Mutex<Matcher>],
+    workers: usize,
+) -> Vec<ScoredIndex> {
     let batch_count = texts.len().div_ceil(PARALLEL_BATCH_SIZE);
     let next_batch = AtomicUsize::new(0);
-    let scored = thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(workers);
-        for worker_idx in 0..workers {
-            let next_batch = &next_batch;
-            let matcher_mutex = &pool[worker_idx];
-            handles.push(scope.spawn(move || {
-                let mut guard = matcher_mutex
-                    .lock()
-                    .expect("nucleo matcher pool mutex poisoned");
-                let matcher: &mut Matcher = &mut *guard;
-                let mut scored = Vec::new();
-                loop {
-                    let batch_index = next_batch.fetch_add(1, Ordering::Relaxed);
-                    if batch_index >= batch_count {
-                        break;
-                    }
+    thread::scope(|scope| {
+        let handles = pool
+            .iter()
+            .take(workers)
+            .map(|matcher_mutex| {
+                let next_batch = &next_batch;
+                scope.spawn(move || {
+                    score_worker_batches(pattern, texts, batch_count, next_batch, matcher_mutex)
+                })
+            })
+            .collect::<Vec<_>>();
 
-                    let start = batch_index * PARALLEL_BATCH_SIZE;
-                    let end = (start + PARALLEL_BATCH_SIZE).min(texts.len());
-                    scored.extend(score_item_range(
-                        pattern,
-                        &texts[start..end],
-                        start,
-                        matcher,
-                    ));
-                }
-                scored
-            }));
-        }
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("nucleo worker thread panicked"))
+            .collect()
+    })
+}
 
-        let mut scored = Vec::new();
-        for handle in handles {
-            scored.extend(handle.join().expect("nucleo worker thread panicked"));
-        }
-        scored
-    });
+fn score_worker_batches(
+    pattern: &Pattern,
+    texts: &[String],
+    batch_count: usize,
+    next_batch: &AtomicUsize,
+    matcher_mutex: &Mutex<Matcher>,
+) -> Vec<ScoredIndex> {
+    let mut guard = matcher_mutex
+        .lock()
+        .expect("nucleo matcher pool mutex poisoned");
+    let matcher: &mut Matcher = &mut guard;
+    let mut scored = Vec::new();
 
-    sort_scored(scored, texts, sort_options)
+    while let Some((start, end)) = next_score_batch(texts.len(), batch_count, next_batch) {
+        scored.extend(score_item_range(
+            pattern,
+            &texts[start..end],
+            start,
+            matcher,
+        ));
+    }
+
+    scored
+}
+
+fn next_score_batch(
+    item_count: usize,
+    batch_count: usize,
+    next_batch: &AtomicUsize,
+) -> Option<(usize, usize)> {
+    let batch_index = next_batch.fetch_add(1, AtomicOrdering::Relaxed);
+    if batch_index >= batch_count {
+        return None;
+    }
+
+    let start = batch_index * PARALLEL_BATCH_SIZE;
+    let end = (start + PARALLEL_BATCH_SIZE).min(item_count);
+    Some((start, end))
 }
 
 fn parallel_worker_count(item_count: usize, available_parallelism: usize) -> usize {
@@ -182,25 +225,54 @@ fn sort_scored(
     });
 
     scored.sort_unstable_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| match &lengths {
-                Some(lengths) => lengths[a.index].cmp(&lengths[b.index]),
-                None => std::cmp::Ordering::Equal,
-            })
-            .then_with(|| {
-                if sort_options.ties_alphabetically {
-                    match &folded_texts {
-                        Some(folded_texts) => folded_texts[a.index].cmp(&folded_texts[b.index]),
-                        None => texts[a.index].cmp(&texts[b.index]),
-                    }
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .then_with(|| a.index.cmp(&b.index))
+        compare_scored(
+            a,
+            b,
+            texts,
+            sort_options,
+            lengths.as_deref(),
+            folded_texts.as_deref(),
+        )
     });
     scored
+}
+
+fn compare_scored(
+    a: &ScoredIndex,
+    b: &ScoredIndex,
+    texts: &[String],
+    sort_options: SortOptions,
+    lengths: Option<&[usize]>,
+    folded_texts: Option<&[String]>,
+) -> Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| compare_length_tie(a, b, lengths))
+        .then_with(|| compare_alphabetical_tie(a, b, texts, folded_texts, sort_options))
+        .then_with(|| a.index.cmp(&b.index))
+}
+
+fn compare_length_tie(a: &ScoredIndex, b: &ScoredIndex, lengths: Option<&[usize]>) -> Ordering {
+    lengths.map_or(Ordering::Equal, |lengths| {
+        lengths[a.index].cmp(&lengths[b.index])
+    })
+}
+
+fn compare_alphabetical_tie(
+    a: &ScoredIndex,
+    b: &ScoredIndex,
+    texts: &[String],
+    folded_texts: Option<&[String]>,
+    sort_options: SortOptions,
+) -> Ordering {
+    if !sort_options.ties_alphabetically {
+        return Ordering::Equal;
+    }
+
+    match folded_texts {
+        Some(folded_texts) => folded_texts[a.index].cmp(&folded_texts[b.index]),
+        None => texts[a.index].cmp(&texts[b.index]),
+    }
 }
 
 fn score_item_range(
@@ -260,26 +332,101 @@ fn indices_to_lisp<'e>(env: &'e Env, indices: Vec<u32>) -> Result<Value<'e>> {
 /// the previous filter result."  The check is cheap.
 fn input_pending(env: &Env) -> Result<bool> {
     let args: [Value; 0] = [];
-    Ok(env.call("input-pending-p", &args)?.is_not_nil())
+    Ok(env.call("input-pending-p", args)?.is_not_nil())
 }
 
-fn build_list_4<'e>(
-    env: &'e Env,
-    a: Value<'e>,
-    b: Value<'e>,
-    c: Value<'e>,
-    d: Value<'e>,
-) -> Result<Value<'e>> {
+fn build_list_3<'e>(env: &'e Env, a: Value<'e>, b: Value<'e>, c: Value<'e>) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
-    env.cons(a, env.cons(b, env.cons(c, env.cons(d, nil)?)?)?)
+    env.cons(a, env.cons(b, env.cons(c, nil)?)?)
 }
 
 fn empty_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
-    // (CANDIDATES TOP-INFO FULL-SCORES) — final nil is the list terminator.
-    build_list_4(env, nil, nil, nil, nil)
+    build_list_3(env, nil, nil, nil)
 }
 
+fn build_candidates_list<'e>(
+    env: &'e Env,
+    values: &[Value<'e>],
+    matches: &[ScoredIndex],
+) -> Result<Value<'e>> {
+    let nil = env.intern("nil")?;
+    let mut candidates_list = nil;
+    for scored in matches.iter().rev() {
+        candidates_list = env.cons(values[scored.index], candidates_list)?;
+    }
+    Ok(candidates_list)
+}
+
+fn build_top_info<'e>(
+    env: &'e Env,
+    pattern: &Pattern,
+    texts: &[String],
+    values: &[Value<'e>],
+    matches: &[ScoredIndex],
+    highlight_limit: usize,
+) -> Result<Value<'e>> {
+    let nil = env.intern("nil")?;
+    let mut top_info = nil;
+    for scored in matches.iter().take(highlight_limit).rev() {
+        let entry = build_top_info_entry(env, pattern, texts, values, scored, nil)?;
+        top_info = env.cons(entry, top_info)?;
+    }
+    Ok(top_info)
+}
+
+fn build_top_info_entry<'e>(
+    env: &'e Env,
+    pattern: &Pattern,
+    texts: &[String],
+    values: &[Value<'e>],
+    scored: &ScoredIndex,
+    nil: Value<'e>,
+) -> Result<Value<'e>> {
+    let indices_value =
+        match with_matcher(|matcher| matched_indices(pattern, &texts[scored.index], matcher)) {
+            Some(indices) => indices_to_lisp(env, indices)?,
+            None => nil,
+        };
+    env.cons(
+        values[scored.index],
+        env.cons(scored.score.into_lisp(env)?, env.cons(indices_value, nil)?)?,
+    )
+}
+
+fn build_full_scores<'e>(
+    env: &'e Env,
+    matches: &[ScoredIndex],
+    return_all_scores: bool,
+) -> Result<Value<'e>> {
+    let nil = env.intern("nil")?;
+    if !return_all_scores {
+        return Ok(nil);
+    }
+
+    let mut full_scores = nil;
+    for scored in matches.iter().rev() {
+        full_scores = env.cons(scored.score.into_lisp(env)?, full_scores)?;
+    }
+    Ok(full_scores)
+}
+
+fn build_candidate_bundle<'e>(
+    env: &'e Env,
+    pattern: &Pattern,
+    values: &[Value<'e>],
+    texts: &[String],
+    matches: &[ScoredIndex],
+    highlight_limit: usize,
+    return_all_scores: bool,
+) -> Result<Value<'e>> {
+    let candidates_list = build_candidates_list(env, values, matches)?;
+    let top_info = build_top_info(env, pattern, texts, values, matches, highlight_limit)?;
+    let full_scores = build_full_scores(env, matches, return_all_scores)?;
+    build_list_3(env, candidates_list, top_info, full_scores)
+}
+
+#[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]
 #[defun]
 fn candidates<'e>(
     env: &'e Env,
@@ -297,16 +444,10 @@ fn candidates<'e>(
 
     let (values, texts) = collect_candidates(candidates)?;
     let ignore_case = ignore_case.is_not_nil();
+    let sort_options =
+        SortOptions::from_lisp(sort_ties_by_length, sort_ties_alphabetically, ignore_case);
     let pattern = Pattern::parse(&pattern, case_matching(ignore_case), Normalization::Smart);
-    let matches = score_items_with_sort(
-        &pattern,
-        &texts,
-        SortOptions {
-            ties_by_length: sort_ties_by_length.is_not_nil(),
-            ties_alphabetically: sort_ties_alphabetically.is_not_nil(),
-            ignore_case,
-        },
-    );
+    let matches = score_items_with_sort(&pattern, &texts, sort_options);
 
     if input_pending(env)? {
         return empty_bundle(env);
@@ -314,55 +455,14 @@ fn candidates<'e>(
 
     let highlight_limit = highlight_limit.into_rust::<usize>()?;
     let return_all_scores = return_all_scores.is_not_nil();
-    let nil = env.intern("nil")?;
-
-    // CANDIDATES: flat sorted list.  One cons per match (vs. the old
-    // shape that produced four cons cells per match for the outer list
-    // plus the (cand score indices) triple).
-    let mut candidates_list = nil;
-    for scored in matches.iter().rev() {
-        candidates_list = env.cons(values[scored.index], candidates_list)?;
-    }
-
-    // TOP-INFO: at most `highlight_limit` (CAND SCORE INDICES) entries.
-    // Indices are computed only here so non-top-N matches do not pay
-    // for index recording or for the extra allocation.
-    let top_n = matches.len().min(highlight_limit);
-    let mut top_info = nil;
-    for i in (0..top_n).rev() {
-        let scored = &matches[i];
-        let indices_value = match with_matcher(|matcher| {
-            matched_indices(&pattern, &texts[scored.index], matcher)
-        }) {
-            Some(indices) => indices_to_lisp(env, indices)?,
-            None => nil,
-        };
-        // (cand score indices-list)
-        let entry = env.cons(
-            values[scored.index],
-            env.cons(scored.score.into_lisp(env)?, env.cons(indices_value, nil)?)?,
-        )?;
-        top_info = env.cons(entry, top_info)?;
-    }
-
-    // FULL-SCORES: parallel-to-CANDIDATES list, populated only when
-    // the caller asks for it (lazy-hilit + score-band path).  Default
-    // off so the common eager and no-score-band cases pay no extra
-    // cons cells for per-candidate scores.
-    let full_scores = if return_all_scores {
-        let mut alist = nil;
-        for scored in matches.iter().rev() {
-            alist = env.cons(scored.score.into_lisp(env)?, alist)?;
-        }
-        alist
-    } else {
-        nil
-    };
-
-    let nil_terminator = env.intern("nil")?;
-    env.cons(
-        candidates_list,
-        env.cons(top_info, env.cons(full_scores, nil_terminator)?)?,
+    build_candidate_bundle(
+        env,
+        &pattern,
+        &values,
+        &texts,
+        &matches,
+        highlight_limit,
+        return_all_scores,
     )
 }
 

@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026
 
 ;; Author: Nobu <https://github.com/kn66>
-;; Assisted-by: OpenAI Codex
+;; Assisted-by: OpenAI Codex:gpt-5
 ;; Version: 0.1.8
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: matching, convenience
@@ -32,6 +32,7 @@
 (declare-function mm-save-part-to-file "mm-decode")
 (declare-function url-retrieve-synchronously "url")
 (defvar mm-attachment-file-modes)
+(defvar completion-lazy-hilit-fn)
 (defvar url-http-codes)
 (defvar url-http-response-status)
 
@@ -1134,6 +1135,7 @@ regexp set, mirroring `nucleo-completion--regexp-filter-pairs'."
 (defun nucleo-completion--prepend-regexp-only-matches
     (needle scorable bundle)
   "Return BUNDLE with regexp-only matches from SCORABLE prepended.
+NEEDLE is the current completion pattern.
 BUNDLE is (CANDIDATES TOP-INFO FULL-SCORES).  Returns a new
 bundle with the same shape.  For each prepended candidate a
 synthetic top-info entry (CAND MAX-SCORE nil) is added so the
@@ -1278,6 +1280,146 @@ SCORE is compared to MAX-SCORE when both are non-nil."
                   needle haystack score max-score))
   (nucleo-completion-highlight needle haystack indices))
 
+(defun nucleo-completion--completion-regexp-list
+    (needle expanded-regexp-p module-p)
+  "Return `completion-regexp-list' adjusted for NEEDLE.
+EXPANDED-REGEXP-P and MODULE-P skip adding fallback regexps when
+another filtering path already handles regexp expansion."
+  (if (or expanded-regexp-p module-p)
+      completion-regexp-list
+    (append
+     (apply #'append (nucleo-completion--term-regexp-groups needle))
+     completion-regexp-list)))
+
+(defun nucleo-completion--initial-completion-candidates
+    (prefix needle table pred regexp-list)
+  "Return completion candidates before Nucleo filtering.
+PREFIX, NEEDLE, TABLE, and PRED have the same meaning as in
+`nucleo-completion--all-completions-1'.  REGEXP-LIST is the
+currently effective `completion-regexp-list'."
+  (if (and (string= prefix "") (stringp (car-safe table))
+           (not (or pred regexp-list
+                    (string= needle ""))))
+      table
+    (all-completions prefix table pred)))
+
+(defun nucleo-completion--module-completion-results
+    (needle all expanded-regexp-p highlight-limit need-full-scores)
+  "Return module-backed filtering result for NEEDLE and ALL.
+When EXPANDED-REGEXP-P is non-nil, prepend regexp-only matches.
+HIGHLIGHT-LIMIT and NEED-FULL-SCORES are passed to the module.
+The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
+  (pcase-let ((`(,scorable ,long)
+               (nucleo-completion--split-scored-candidates all)))
+    (let ((long-filtered (nucleo-completion--regexp-filter needle long))
+          bundle
+          top-info
+          full-scores)
+      (when scorable
+        (setq bundle (nucleo-completion--module-results
+                      needle scorable completion-ignore-case
+                      highlight-limit need-full-scores)))
+      (when (and scorable expanded-regexp-p)
+        (setq bundle
+              (nucleo-completion--prepend-regexp-only-matches
+               needle scorable (or bundle (list nil nil nil)))))
+      (when bundle
+        (setq top-info (nucleo-completion--bundle-top-info bundle)
+              full-scores (nucleo-completion--bundle-full-scores bundle)))
+      (list (append
+             (and bundle (nucleo-completion--bundle-candidates bundle))
+             long-filtered)
+            bundle top-info full-scores))))
+
+(defun nucleo-completion--filter-completions
+    (needle all module-p expanded-regexp-p highlight-limit need-full-scores)
+  "Return filtered completion data for NEEDLE and ALL.
+MODULE-P selects the Rust module path.  EXPANDED-REGEXP-P,
+HIGHLIGHT-LIMIT, and NEED-FULL-SCORES are passed through when the
+module path is used.
+The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
+  (cond
+   ((or (null all) (string= needle ""))
+    (list all nil nil nil))
+   (module-p
+    (nucleo-completion--module-completion-results
+     needle all expanded-regexp-p highlight-limit need-full-scores))
+   (t
+    (list (nucleo-completion--fallback-filter needle all) nil nil nil))))
+
+(defun nucleo-completion--record-current-result (prefix needle all)
+  "Record ALL as the current completion result for PREFIX and NEEDLE."
+  (setq nucleo-completion--filtering-p (not (string= needle "")))
+  (setq nucleo-completion--current-prefix prefix
+        nucleo-completion--current-result
+        (if (string= prefix "") all (copy-sequence all))))
+
+(defun nucleo-completion--install-lazy-highlight
+    (needle bundle top-info full-scores max-score)
+  "Install lazy highlighting for NEEDLE using BUNDLE metadata.
+TOP-INFO and FULL-SCORES provide score and index lookup data.
+MAX-SCORE is used for score-band classification."
+  (let ((info-hash (and top-info
+                        (nucleo-completion--top-info-hash top-info)))
+        (score-hash (and full-scores
+                         (nucleo-completion--full-scores-hash
+                          (nucleo-completion--bundle-candidates bundle)
+                          full-scores))))
+    (setq completion-lazy-hilit-fn
+          (lambda (candidate)
+            (let* ((info (and info-hash
+                              (gethash candidate info-hash)))
+                   (score (or (and info
+                                   (nucleo-completion--top-info-score
+                                    info))
+                              (and score-hash
+                                   (gethash candidate score-hash))))
+                   (indices (and info
+                                 (nucleo-completion--top-info-indices
+                                  info))))
+              (nucleo-completion--highlight-candidate
+               needle candidate score max-score indices))))))
+
+(defun nucleo-completion--highlight-eager
+    (needle all top-info max-score highlight-limit)
+  "Eagerly highlight up to HIGHLIGHT-LIMIT candidates in ALL.
+NEEDLE is the current completion pattern.  TOP-INFO and MAX-SCORE
+provide score and index data when available."
+  (let ((info-hash (and top-info
+                        (nucleo-completion--top-info-hash top-info))))
+    (cl-loop repeat highlight-limit
+             for x in-ref all
+             for info = (and info-hash (gethash x info-hash))
+             for score = (and info
+                              (nucleo-completion--top-info-score info))
+             for indices = (and info
+                                (nucleo-completion--top-info-indices
+                                 info))
+             do (setf x (nucleo-completion--highlight-candidate
+                         needle (copy-sequence x) score max-score
+                         indices))))
+  all)
+
+(defun nucleo-completion--highlight-completions
+    (needle all bundle top-info full-scores max-score highlight-limit lazy-hilit-p)
+  "Apply lazy or eager highlighting setup to ALL.
+NEEDLE is the current completion pattern.  BUNDLE, TOP-INFO,
+FULL-SCORES, MAX-SCORE, and HIGHLIGHT-LIMIT provide module
+metadata.  LAZY-HILIT-P selects lazy highlighting."
+  (cond
+   (lazy-hilit-p
+    (nucleo-completion--install-lazy-highlight
+     needle bundle top-info full-scores max-score)
+    all)
+   ((and (> highlight-limit 0) all)
+    (nucleo-completion--highlight-eager
+     needle all top-info max-score highlight-limit))
+   (t all)))
+
+(defun nucleo-completion--with-base-size (prefix all)
+  "Return ALL with a base-size marker when PREFIX is non-empty."
+  (and all (if (string= prefix "") all (nconc all (length prefix)))))
+
 (defun nucleo-completion--all-completions-1 (string table &optional pred point)
   "Get Nucleo completions of STRING in TABLE.
 See `completion-all-completions' for the semantics of PRED and POINT."
@@ -1302,90 +1444,25 @@ See `completion-all-completions' for the semantics of PRED and POINT."
            (need-full-scores
             (and lazy-hilit-p nucleo-completion-highlight-score-bands))
            (completion-regexp-list
-            (if (or expanded-regexp-p module-p)
-                completion-regexp-list
-              (append
-               (apply #'append (nucleo-completion--term-regexp-groups needle))
-               completion-regexp-list)))
-           (all (if (and (string= prefix "") (stringp (car-safe table))
-                         (not (or pred completion-regexp-list
-                                  (string= needle ""))))
-                    table
-                  (all-completions prefix table pred)))
-           bundle
-           top-info
-           full-scores
-           max-score
-           long-filtered)
+            (nucleo-completion--completion-regexp-list
+             needle expanded-regexp-p module-p))
+           (all (nucleo-completion--initial-completion-candidates
+                 prefix needle table pred completion-regexp-list)))
       (unless (equal prefix nucleo-completion--current-prefix)
         (setq nucleo-completion--current-prefix prefix
               nucleo-completion--current-result nil))
-      (cond
-       ((or (null all) (string= needle "")))
-       (module-p
-        (pcase-let ((`(,scorable ,long)
-                     (nucleo-completion--split-scored-candidates all)))
-          (setq long-filtered (nucleo-completion--regexp-filter needle long))
-          (when scorable
-            (setq bundle (nucleo-completion--module-results
-                          needle scorable completion-ignore-case
-                          highlight-limit need-full-scores)))
-          (when (and scorable expanded-regexp-p)
-            (setq bundle
-                  (nucleo-completion--prepend-regexp-only-matches
-                   needle scorable (or bundle (list nil nil nil)))))
-          (when bundle
-            (setq top-info (nucleo-completion--bundle-top-info bundle)
-                  full-scores (nucleo-completion--bundle-full-scores bundle)))
-          (setq all (append
-                     (and bundle (nucleo-completion--bundle-candidates bundle))
-                     long-filtered))))
-       (t
-        (setq all (nucleo-completion--fallback-filter needle all))))
-      (when top-info
-        (setq max-score (nucleo-completion--top-info-score (car top-info))))
-      (setq nucleo-completion--filtering-p (not (string= needle "")))
-      (setq nucleo-completion--current-prefix prefix
-            nucleo-completion--current-result
-            (if (string= prefix "") all (copy-sequence all)))
-      (defvar completion-lazy-hilit-fn)
-      (cond
-       (lazy-hilit-p
-        (let ((info-hash (and top-info
-                              (nucleo-completion--top-info-hash top-info)))
-              (score-hash (and full-scores
-                               (nucleo-completion--full-scores-hash
-                                (nucleo-completion--bundle-candidates bundle)
-                                full-scores))))
-          (setq completion-lazy-hilit-fn
-                (lambda (candidate)
-                  (let* ((info (and info-hash
-                                    (gethash candidate info-hash)))
-                         (score (or (and info
-                                         (nucleo-completion--top-info-score
-                                          info))
-                                    (and score-hash
-                                         (gethash candidate score-hash))))
-                         (indices (and info
-                                       (nucleo-completion--top-info-indices
-                                        info))))
-                    (nucleo-completion--highlight-candidate
-                     needle candidate score max-score indices))))))
-       ((and (> highlight-limit 0) all)
-        (let ((info-hash (and top-info
-                              (nucleo-completion--top-info-hash top-info))))
-          (cl-loop repeat highlight-limit
-                   for x in-ref all
-                   for info = (and info-hash (gethash x info-hash))
-                   for score = (and info
-                                    (nucleo-completion--top-info-score info))
-                   for indices = (and info
-                                      (nucleo-completion--top-info-indices
-                                       info))
-                   do (setf x (nucleo-completion--highlight-candidate
-                               needle (copy-sequence x) score max-score
-                               indices))))))
-      (and all (if (string= prefix "") all (nconc all (length prefix)))))))
+      (pcase-let* ((`(,all ,bundle ,top-info ,full-scores)
+                    (nucleo-completion--filter-completions
+                     needle all module-p expanded-regexp-p
+                     highlight-limit need-full-scores))
+                   (max-score (and top-info
+                                   (nucleo-completion--top-info-score
+                                    (car top-info)))))
+        (nucleo-completion--record-current-result prefix needle all)
+        (setq all (nucleo-completion--highlight-completions
+                   needle all bundle top-info full-scores max-score
+                   highlight-limit lazy-hilit-p))
+        (nucleo-completion--with-base-size prefix all)))))
 
 ;;;###autoload
 (defun nucleo-completion-all-completions (string table &optional pred point)
