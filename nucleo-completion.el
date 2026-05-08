@@ -1454,9 +1454,10 @@ text."
 
 (defun nucleo-completion--refine-try-result
     (result original-string original-point table pred)
-  "Refine RESULT with TABLE's native `try-completion' when useful.
+  "Refine RESULT with native `try-completion' for TABLE.
 ORIGINAL-STRING and ORIGINAL-POINT describe the user input before
-Nucleo filtering.  RESULT follows `completion-try-completion'
+Nucleo filtering.  TABLE and PRED are passed to the native
+completion table.  RESULT follows `completion-try-completion'
 semantics."
   (let (string point)
     (cond
@@ -1480,6 +1481,7 @@ semantics."
 
 (defun nucleo-completion--field-state (string table pred point)
   "Return completion field data for STRING at POINT.
+TABLE and PRED identify the completion table and predicate.
 The result has the form (POINT PREFIX BEFORE FIELD-SUFFIX
 EXTERNAL-SUFFIX PATTERN).  BEFORE is the completion field text
 before point.  FIELD-SUFFIX is the text after point that still
@@ -1527,7 +1529,8 @@ return STRING unchanged at POINT to indicate that matches exist."
 (defun nucleo-completion--try-completion-with-filter
     (string table pred point)
   "Try completing STRING by using Nucleo's filtered candidate set.
-PRED and POINT follow `completion-try-completion' semantics."
+TABLE is the completion table.  PRED and POINT follow
+`completion-try-completion' semantics."
   (pcase-let* ((`(,point ,prefix ,_before ,_field-suffix ,suffix ,pattern)
                 (nucleo-completion--field-state string table pred point))
                (module-p (nucleo-completion--module-ready-p))
@@ -1555,7 +1558,9 @@ matchers for PATTERN."
       (cdr (nucleo-completion--terms pattern))))
 
 (defun nucleo-completion--try-completion-1 (string table pred point)
-  "Implementation of `nucleo-completion-try-completion'."
+  "Implement `nucleo-completion-try-completion' for STRING.
+TABLE, PRED, and POINT follow `completion-try-completion'
+semantics."
   (pcase-let ((`(,point ,_prefix ,_before ,_field-suffix ,_suffix ,pattern)
                (nucleo-completion--field-state string table pred point)))
     (unless (nucleo-completion--flex-nospace-p string)

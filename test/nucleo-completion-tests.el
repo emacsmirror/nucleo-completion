@@ -4,7 +4,13 @@
 (require 'cl-lib)
 (require 'nucleo-completion)
 
+;;; Code:
+
+(defvar completion-lazy-hilit-fn nil
+  "Function used by completion UIs to lazily highlight candidates.")
+
 (defun nucleo-completion-tests--plain (strings)
+  "Return STRINGS without text properties."
   (mapcar #'substring-no-properties strings))
 
 (defun nucleo-completion-tests--bundle (triples &optional return-all-scores)
@@ -19,7 +25,8 @@ populated when RETURN-ALL-SCORES is non-nil."
           (mapcar #'cadr triples))))
 
 (defmacro nucleo-completion-tests--with-mock-candidates (triples &rest body)
-  "Stub `nucleo-completion-candidates' to return TRIPLES wrapped as a bundle."
+  "Stub `nucleo-completion-candidates' in BODY.
+The stub returns TRIPLES wrapped as a module-result bundle."
   (declare (indent 1))
   `(cl-letf (((symbol-function 'nucleo-completion-candidates)
               (lambda (_needle _candidates _ignore-case _by-length
@@ -30,13 +37,16 @@ populated when RETURN-ALL-SCORES is non-nil."
      ,@body))
 
 (defun nucleo-completion-tests--high-score-face-p (faces)
+  "Return non-nil when FACES include the high-score face."
   (cl-some (lambda (face)
              (eq face 'nucleo-completion-high-score-face))
            (ensure-list faces)))
 
-(defvar nucleo-completion-tests--regexp-calls 0)
+(defvar nucleo-completion-tests--regexp-calls 0
+  "Number of calls made to `nucleo-completion-tests--nihon-regexp'.")
 
 (defun nucleo-completion-tests--nihon-regexp (term)
+  "Return a Japanese regexp for TERM when it is the romanized test term."
   (setq nucleo-completion-tests--regexp-calls
         (1+ nucleo-completion-tests--regexp-calls))
   (when (string= term "nihon")
@@ -178,7 +188,7 @@ populated when RETURN-ALL-SCORES is non-nil."
                    (lambda () loaded))
                   ((symbol-function 'yes-or-no-p)
                    (lambda (_prompt)
-                     (error "install test should not prompt"))))
+                     (error "Install test should not prompt"))))
           (let ((destination (nucleo-completion-install-module nil t)))
             (should (equal (file-name-nondirectory destination)
                            "libnucleo_completion_module.so"))
@@ -228,7 +238,7 @@ populated when RETURN-ALL-SCORES is non-nil."
                (lambda () nil))
               ((symbol-function 'module-load)
                (lambda (_file)
-                 (error "module-load must not be called"))))
+                 (error "Module-load must not be called"))))
       (should-not (nucleo-completion--module-candidates))
       (nucleo-completion--load-module)
       (should (equal nucleo-completion-module-load-errors 'stale)))))
@@ -248,11 +258,11 @@ populated when RETURN-ALL-SCORES is non-nil."
                (lambda (_file) t))
               ((symbol-function 'module-load)
                (lambda (file)
-                 (error "cannot load %s" file))))
+                 (error "Cannot load %s" file))))
       (nucleo-completion--load-module)
       (should (equal nucleo-completion-module-load-errors
-                     '(("/tmp/nucleo-a.so" . "cannot load /tmp/nucleo-a.so")
-                       ("/tmp/nucleo-b.so" . "cannot load /tmp/nucleo-b.so")))))))
+                     '(("/tmp/nucleo-a.so" . "Cannot load /tmp/nucleo-a.so")
+                       ("/tmp/nucleo-b.so" . "Cannot load /tmp/nucleo-b.so")))))))
 
 (ert-deftest nucleo-completion-custom-group-test ()
   (let ((members (get 'nucleo-completion 'custom-group)))
@@ -444,7 +454,7 @@ populated when RETURN-ALL-SCORES is non-nil."
   (let ((nucleo-completion-scrub-non-unicode-candidates nil))
     (cl-letf (((symbol-function 'nucleo-completion--scrub-candidates)
                (lambda (_candidates)
-                 (error "scrub should not run")))
+                 (error "Scrub should not run")))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
                                 _alphabetically _limit
@@ -481,7 +491,7 @@ populated when RETURN-ALL-SCORES is non-nil."
                (lambda () nil))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (&rest _)
-                 (error "fallback must not call the Rust candidate API"))))
+                 (error "Fallback must not call the Rust candidate API"))))
       (let ((all (nucleo-completion-all-completions
                   "fb" '("foo-baz" "fb" "foobar" "bar"))))
         (should (equal (nucleo-completion-tests--plain all)
@@ -1114,26 +1124,26 @@ populated when RETURN-ALL-SCORES is non-nil."
                   return-all-scores)))
               ((symbol-function 'nucleo-completion--top-info-hash)
                (lambda (_top-info)
-                 (error "top-info hash must not be built")))
+                 (error "Top-info hash must not be built")))
               ((symbol-function 'nucleo-completion--full-scores-hash)
                (lambda (_candidates _full-scores)
-                 (error "full-scores hash must not be built"))))
+                 (error "Full-scores hash must not be built"))))
       (should (equal (nucleo-completion-tests--plain
                       (nucleo-completion-all-completions
                        "fo" '("foo" "fob" "bar")))
                      '("foo" "fob"))))))
 
 (ert-deftest nucleo-completion-lazy-highlight-avoids-key-allocation-test ()
-  "Hash tables keyed on candidate strings rely on the `equal'
-test, which already compares string contents independently of
-text properties.  The lazy highlight lambda must therefore avoid
+  "Avoid allocating stripped keys during lazy highlighting.
+Hash tables keyed on candidate strings rely on the `equal' test,
+which already compares string contents independently of text
+properties.  The lazy highlight lambda must therefore avoid
 allocating a stripped key with `substring-no-properties' on each
 invocation."
   (let ((completion-ignore-case nil)
         (completion-lazy-hilit t)
         (nucleo-completion-max-highlighted-completions 10)
         (calls 0))
-    (defvar completion-lazy-hilit-fn)
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle _candidates _ignore-case _by-length
                                 _alphabetically _limit
