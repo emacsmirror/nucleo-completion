@@ -557,8 +557,7 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
   "Return an uncached fuzzy subsequence regexp for NEEDLE."
   (mapconcat
    (lambda (ch)
-     (let ((s (char-to-string ch)))
-       (concat "[^" (regexp-quote s) "]*" (regexp-quote s))))
+     (concat "\\(?:.\\|\n\\)*" (regexp-quote (char-to-string ch))))
    needle
    ""))
 
@@ -602,10 +601,9 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
 
 (defun nucleo-completion--persistent-regexp-cache-limit ()
   "Return sanitized persistent regexp cache size, or nil when disabled."
-  (when (and (nucleo-completion--nonnegative-integer-or-nil
-              nucleo-completion-persistent-regexp-cache-size)
-             (> nucleo-completion-persistent-regexp-cache-size 0))
-    nucleo-completion-persistent-regexp-cache-size))
+  (let ((size nucleo-completion-persistent-regexp-cache-size))
+    (when (and (integerp size) (> size 0))
+      size)))
 
 (defun nucleo-completion--persistent-regexp-cache-key (term)
   "Return persistent regexp cache key for TERM."
@@ -651,8 +649,7 @@ omit regexps from `nucleo-completion-regexp-functions'."
 
 (defun nucleo-completion--expanded-regexp-p (needle)
   "Return non-nil if NEEDLE has extra regexps from configured functions."
-  (cl-some (lambda (term)
-             (nucleo-completion--regexp-function-regexps term))
+  (cl-some #'nucleo-completion--regexp-function-regexps
            (nucleo-completion--terms needle)))
 
 (defun nucleo-completion--regexp-match-p (regexp-groups candidate)
@@ -713,12 +710,16 @@ original CANDIDATES list is reused without copying."
   (let ((threshold (nucleo-completion--long-candidate-threshold)))
     (cond
      ((null threshold) (list candidates nil))
-     ((not (cl-some (lambda (c) (> (length c) threshold)) candidates))
+     ((not (cl-some (lambda (c)
+                      (and (integerp threshold)
+                           (> (length c) threshold)))
+                    candidates))
       (list candidates nil))
      (t
       (let (scorable long)
         (dolist (candidate candidates)
-          (if (> (length candidate) threshold)
+          (if (and (integerp threshold)
+                   (> (length candidate) threshold))
               (push candidate long)
             (push candidate scorable)))
         (list (nreverse scorable) (nreverse long)))))))
@@ -847,15 +848,9 @@ must be stripped before crossing the FFI boundary.")
 
 (defun nucleo-completion--unicode-string-p (string)
   "Return non-nil when every character in STRING is a Unicode codepoint."
-  (let ((max nucleo-completion--max-unicode-codepoint)
-        (i 0)
-        (len (length string))
-        (ok t))
-    (while (and ok (< i len))
-      (when (> (aref string i) max)
-        (setq ok nil))
-      (setq i (1+ i)))
-    ok))
+  (cl-loop with max = nucleo-completion--max-unicode-codepoint
+           for ch across string
+           always (<= ch max)))
 
 (defun nucleo-completion--scrub-non-unicode-string (string)
   "Return STRING with non-Unicode characters removed.
@@ -863,16 +858,11 @@ Returns STRING itself when no character needs to be removed so
 the caller can detect untouched candidates with `eq'."
   (if (nucleo-completion--unicode-string-p string)
       string
-    (let ((max nucleo-completion--max-unicode-codepoint)
-          (i 0)
-          (len (length string))
-          chars)
-      (while (< i len)
-        (let ((ch (aref string i)))
-          (when (<= ch max)
-            (push ch chars)))
-        (setq i (1+ i)))
-      (apply #'string (nreverse chars)))))
+    (cl-loop with max = nucleo-completion--max-unicode-codepoint
+             for ch across string
+             when (<= ch max)
+             collect ch into chars
+             finally return (apply #'string chars))))
 
 (defun nucleo-completion--scrub-candidates (candidates)
   "Return (CLEANED . MAP) where CLEANED is suitable for the Rust module.
@@ -888,10 +878,12 @@ list is returned unchanged and MAP is nil."
       (let ((scrubbed (nucleo-completion--scrub-non-unicode-string candidate)))
         (push scrubbed cleaned)
         (unless (eq scrubbed candidate)
-          (unless map
-            (setq map (make-hash-table :test #'equal
-                                       :size (length candidates))))
-          (puthash scrubbed (cons candidate (gethash scrubbed map)) map))))
+          (let ((table (or map
+                           (setq map (make-hash-table
+                                      :test #'equal
+                                      :size (length candidates))))))
+            (puthash scrubbed (cons candidate (gethash scrubbed table))
+                     table)))))
     (when map
       (maphash (lambda (scrubbed originals)
                  (puthash scrubbed (nreverse originals) map))
@@ -1243,15 +1235,18 @@ that `nucleo-completion--results->scored' would allocate."
 
 (defun nucleo-completion--highlight-regexp (regexp haystack)
   "Highlight REGEXP matches in HAYSTACK."
-  (let ((start 0))
-    (while (and (<= start (length haystack))
-                (string-match regexp haystack start))
+  (let (start)
+    (while (let ((position (or start 0)))
+             (and (<= position (length haystack))
+                  (string-match regexp haystack position)))
       (let ((beg (match-beginning 0))
             (end (match-end 0)))
-        (when (< beg end)
-          (add-face-text-property beg end
-                                  'completions-common-part nil haystack))
-        (setq start (if (< beg end) end (1+ start)))))))
+        (if (and (integerp beg) (integerp end) (< beg end))
+            (progn
+              (add-face-text-property beg end
+                                      'completions-common-part nil haystack)
+              (setq start end))
+          (setq start (1+ (or start 0))))))))
 
 (defun nucleo-completion-highlight (needle haystack &optional indices)
   "Highlight destructively the NEEDLE matches in HAYSTACK.
@@ -1356,10 +1351,11 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
 
 (defun nucleo-completion--record-current-result (prefix needle all)
   "Record ALL as the current completion result for PREFIX and NEEDLE."
-  (setq nucleo-completion--filtering-p (not (string= needle "")))
-  (setq nucleo-completion--current-prefix prefix
-        nucleo-completion--current-result
-        (if (string= prefix "") all (copy-sequence all))))
+  (let ((prefix (if (stringp prefix) prefix "")))
+    (setq nucleo-completion--filtering-p (not (string= needle "")))
+    (setq nucleo-completion--current-prefix prefix
+          nucleo-completion--current-result
+          (if (string= prefix "") all (copy-sequence all)))))
 
 (defun nucleo-completion--install-lazy-highlight
     (needle bundle top-info full-scores max-score)
