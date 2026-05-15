@@ -235,8 +235,8 @@ term を繰り返し参照しても、同じ純粋な文字列処理を再実行
 score と precomputed indices の lookup table は highlight で必要になった場合だけ
 作成する。highlight 件数が 0 で lazy highlight も無効な場合は、module 結果を
 filter/sort 済み候補リストとして使うだけにし、追加の hash table 作成を避ける。
-lazy highlight では候補文字列の property-free key を一度だけ作り、score と indices
-の lookup に再利用する。
+lazy highlight では ~equal~ hash table に候補文字列を直接 key として保存し、
+text property を取り除くための追加文字列 allocation を避ける。
 
 ~nucleo-completion-scrub-non-unicode-candidates~ が nil の場合、Rust module に
 候補を渡す前の non-Unicode codepoint 走査は行わない。通常の completion table は
@@ -405,6 +405,7 @@ ERT では次を検証する。
 - exact match で point だけが候補末尾より前にある ~try-completion~
 - regexp expander の文字列、リスト、無効値処理
 - regexp expander の buffer-local 無効化
+- ~completion-regexp-list~ を completion table 呼び出しへ反映する挙動
 - regexp-only match preservation
 - fallback filter-only behavior
 - metadata adjustment

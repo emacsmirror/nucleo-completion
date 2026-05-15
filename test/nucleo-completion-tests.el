@@ -554,6 +554,17 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                     '("a" "abcd" "bc" "cdefg"))
                    '(("a" "bc") ("abcd" "cdefg"))))))
 
+(ert-deftest nucleo-completion-initial-candidates-binds-regexp-list-test ()
+  (let (seen-regexp-list)
+    (cl-labels ((table (_string _pred action)
+                  (when (eq action t)
+                    (setq seen-regexp-list completion-regexp-list)
+                    '("foo" "bar"))))
+      (should (equal (nucleo-completion--initial-completion-candidates
+                      "" "fo" #'table nil '("f.*o"))
+                     '("foo" "bar")))
+      (should (equal seen-regexp-list '("f.*o"))))))
+
 (ert-deftest nucleo-completion-filter-test ()
   (let ((completion-ignore-case nil))
     (should (equal (nucleo-completion-tests--plain
@@ -941,18 +952,9 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                            when (string-match-p "roman" candidate)
                            collect (list candidate 128 nil))
                   return-all-scores))))
-      (should (equal (let* ((candidates '("日本語" "roman-nihon" "日本史"))
-                            (regexp-pairs
-                             (nucleo-completion--regexp-filter-pairs
-                              "nihon" candidates))
-                            (bundle
-                             (nucleo-completion--module-results
-                              "nihon" (mapcar #'car regexp-pairs) nil 0))
-                            (module-results
-                             (nucleo-completion--bundle-top-info bundle)))
-                       (mapcar #'nucleo-completion--result-candidate
-                               (nucleo-completion--merge-regexp-results
-                                regexp-pairs module-results)))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "nihon" '("日本語" "roman-nihon" "日本史")))
                      '("日本語" "日本史" "roman-nihon"))))))
 
 (ert-deftest nucleo-completion-module-skips-regexp-filter-for-module-matches-test ()
@@ -996,19 +998,10 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                  (nucleo-completion-tests--bundle
                   '(("roman-nihon" 128 nil) ("nihon-tail" 110 nil))
                   return-all-scores))))
-      (let* ((candidates '("roman-nihon" "nihon-tail" "日本"))
-             (regexp-pairs
-              (nucleo-completion--regexp-filter-pairs
-               "nihon" candidates))
-             (bundle
-              (nucleo-completion--module-results
-               "nihon" (mapcar #'car regexp-pairs) nil 0))
-             (module-results
-              (nucleo-completion--bundle-top-info bundle)))
-        (should (equal (mapcar #'nucleo-completion--result-candidate
-                               (nucleo-completion--merge-regexp-results
-                                regexp-pairs module-results))
-                       '("日本" "roman-nihon" "nihon-tail")))))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "nihon" '("roman-nihon" "nihon-tail" "日本")))
+                     '("日本" "roman-nihon" "nihon-tail"))))))
 
 (ert-deftest nucleo-completion-sort-ties-by-length-test ()
   (let ((nucleo-completion-sort-ties-by-length t)
