@@ -130,9 +130,14 @@ and restores the original strings on return.
 
 Keep this nil when candidates are ordinary Unicode strings.  It
 avoids an extra Emacs Lisp scan over every candidate before each
-module call."
+module call.  If a module call later fails with a
+`unicode-string-p' error, Nucleo retries with scrubbing enabled
+and keeps that path for subsequent calls."
   :type 'boolean
   :group 'nucleo-completion)
+
+(defvar nucleo-completion--force-scrub-non-unicode-candidates nil
+  "Non-nil after the module rejects a candidate as non-Unicode.")
 
 (defcustom nucleo-completion-sort-ties-by-length nil
   "Whether to sort equal-scoring Nucleo matches by candidate length.
@@ -848,9 +853,15 @@ must be stripped before crossing the FFI boundary.")
 
 (defun nucleo-completion--unicode-string-p (string)
   "Return non-nil when every character in STRING is a Unicode codepoint."
-  (cl-loop with max = nucleo-completion--max-unicode-codepoint
-           for ch across string
-           always (<= ch max)))
+  (let ((max nucleo-completion--max-unicode-codepoint)
+        (i 0)
+        (len (length string))
+        (ok t))
+    (while (and ok (< i len))
+      (when (> (aref string i) max)
+        (setq ok nil))
+      (setq i (1+ i)))
+    ok))
 
 (defun nucleo-completion--scrub-non-unicode-string (string)
   "Return STRING with non-Unicode characters removed.
@@ -858,60 +869,65 @@ Returns STRING itself when no character needs to be removed so
 the caller can detect untouched candidates with `eq'."
   (if (nucleo-completion--unicode-string-p string)
       string
-    (cl-loop with max = nucleo-completion--max-unicode-codepoint
-             for ch across string
-             when (<= ch max)
-             collect ch into chars
-             finally return (apply #'string chars))))
+    (let ((max nucleo-completion--max-unicode-codepoint)
+          (i 0)
+          (len (length string))
+          chars)
+      (while (< i len)
+        (let ((ch (aref string i)))
+          (when (<= ch max)
+            (push ch chars)))
+        (setq i (1+ i)))
+      (apply #'string (nreverse chars)))))
 
-(defun nucleo-completion--scrub-candidates (candidates)
+(defun nucleo-completion--scrub-candidates
+    (candidates &optional scrub-non-unicode)
   "Return (CLEANED . MAP) where CLEANED is suitable for the Rust module.
-Walks CANDIDATES once and substitutes any string carrying
-characters above `nucleo-completion--max-unicode-codepoint' with a
-scrubbed copy.  MAP is a hash table from each substituted
-scrubbed string to the original candidates in input order.  The
-list value preserves distinct originals that scrub to the same
-string.  When no candidate needs scrubbing the original CANDIDATES
-list is returned unchanged and MAP is nil."
-  (let (map cleaned)
-    (dolist (candidate candidates)
-      (let ((scrubbed (nucleo-completion--scrub-non-unicode-string candidate)))
-        (push scrubbed cleaned)
-        (unless (eq scrubbed candidate)
-          (let ((table (or map
-                           (setq map (make-hash-table
-                                      :test #'equal
-                                      :size (length candidates))))))
-            (puthash scrubbed (cons candidate (gethash scrubbed table))
-                     table)))))
-    (when map
-      (maphash (lambda (scrubbed originals)
-                 (puthash scrubbed (nreverse originals) map))
-               map))
-    (cons (if map (nreverse cleaned) candidates) map)))
+When SCRUB-NON-UNICODE,
+`nucleo-completion-scrub-non-unicode-candidates', or
+`nucleo-completion--force-scrub-non-unicode-candidates' is non-nil,
+walk CANDIDATES once and replace strings containing characters
+above `nucleo-completion--max-unicode-codepoint' with scrubbed
+copies.  MAP is an `eq' hash table from each substituted scrubbed
+copy to the original candidate.  When no scrubbing is requested,
+or no candidate needs substitution, the original CANDIDATES list
+is returned unchanged and MAP is nil."
+  (let ((scrub-non-unicode
+         (or scrub-non-unicode
+             nucleo-completion-scrub-non-unicode-candidates
+             nucleo-completion--force-scrub-non-unicode-candidates)))
+    (if (not scrub-non-unicode)
+        (cons candidates nil)
+      (let (map cleaned)
+        (dolist (candidate candidates)
+          (let ((scrubbed
+                 (nucleo-completion--scrub-non-unicode-string candidate)))
+            (push scrubbed cleaned)
+            (unless (eq scrubbed candidate)
+              (unless map
+                (setq map (make-hash-table :test #'eq
+                                           :size (length candidates))))
+              (puthash scrubbed candidate map))))
+        (cons (if map (nreverse cleaned) candidates) map)))))
 
 (defun nucleo-completion--copy-scrub-map (map)
-  "Return a copy of scrub MAP with independent queue lists."
-  (let ((copy (make-hash-table :test #'equal :size (hash-table-count map))))
-    (maphash (lambda (scrubbed originals)
-               (puthash scrubbed (copy-sequence originals) copy))
+  "Return an independent copy of scrub MAP."
+  (let ((copy (make-hash-table :test #'eq :size (hash-table-count map))))
+    (maphash (lambda (scrubbed original)
+               (puthash scrubbed original copy))
              map)
     copy))
 
 (defun nucleo-completion--restore-scrubbed-candidate (candidate map)
-  "Return original candidate for scrubbed CANDIDATE using queue MAP."
-  (let ((originals (gethash candidate map)))
-    (if originals
-        (prog1 (car originals)
-          (puthash candidate (cdr originals) map))
-      candidate)))
+  "Return original candidate for scrubbed CANDIDATE using MAP."
+  (or (gethash candidate map) candidate))
 
 (defun nucleo-completion--restore-bundle-candidates (bundle map)
   "Replace scrubbed candidates inside BUNDLE with originals from MAP.
-MAP values are queues in input order, so candidates that scrub to
-the same string still restore to distinct originals.  Mutates
-BUNDLE in place because the lists were freshly returned by the
-Rust module and are not shared with any other caller."
+MAP keys are the substituted plain candidate objects passed to
+the Rust module.  Mutates BUNDLE in place because the lists were
+freshly returned by the Rust module and are not shared with any
+other caller."
   (let ((candidate-map (nucleo-completion--copy-scrub-map map))
         (top-info-map (nucleo-completion--copy-scrub-map map)))
     (cl-loop for cell on (nucleo-completion--bundle-candidates bundle)
@@ -923,6 +939,47 @@ Rust module and are not shared with any other caller."
               (nucleo-completion--restore-scrubbed-candidate
                (car entry) top-info-map))))
   bundle)
+
+(defun nucleo-completion--call-module
+    (needle candidates ignore-case highlight-limit return-all-scores)
+  "Call the Rust module and return a normalized result bundle."
+  (if (nucleo-completion--module-supports-bundle-p)
+      (nucleo-completion-candidates
+       needle candidates ignore-case
+       nucleo-completion-sort-ties-by-length
+       nucleo-completion-sort-ties-alphabetically
+       highlight-limit
+       return-all-scores)
+    (let ((triples
+           (nucleo-completion-candidates
+            needle candidates ignore-case
+            nucleo-completion-sort-ties-by-length
+            nucleo-completion-sort-ties-alphabetically
+            highlight-limit)))
+      (list (mapcar #'car triples)
+            triples
+            (when return-all-scores
+              (mapcar #'cadr triples))))))
+
+(defun nucleo-completion--module-unicode-error-p (err)
+  "Return non-nil when ERR is the module string encoder rejecting input."
+  (and (eq (car-safe err) 'wrong-type-argument)
+       (eq (cadr err) 'unicode-string-p)))
+
+(defun nucleo-completion--module-results-with-scrub
+    (needle candidates ignore-case highlight-limit return-all-scores
+            scrub-non-unicode)
+  "Return module result bundle, scrubbing CANDIDATES as requested."
+  (pcase-let* ((`(,cleaned . ,map)
+                (nucleo-completion--scrub-candidates
+                 candidates scrub-non-unicode))
+               (bundle
+                (nucleo-completion--call-module
+                 needle cleaned ignore-case highlight-limit
+                 return-all-scores)))
+    (if map
+        (nucleo-completion--restore-bundle-candidates bundle map)
+      bundle)))
 
 (defun nucleo-completion--module-results
     (needle candidates ignore-case highlight-limit &optional return-all-scores)
@@ -945,35 +1002,30 @@ adapts that legacy shape so callers can use one bundle layout.
 Frontends such as Consult append \"tofu\" disambiguation characters
 whose codepoints exceed Unicode's maximum, which the Rust module
 cannot encode as UTF-8.  Such candidates are scrubbed of those
-characters before being passed to the module and the original
-candidate strings are restored on the way back so their text
-properties (Consult metadata, invisibility, faces) survive when
-`nucleo-completion-scrub-non-unicode-candidates' is non-nil."
-  (pcase-let* ((`(,cleaned . ,map)
-                (if nucleo-completion-scrub-non-unicode-candidates
-                    (nucleo-completion--scrub-candidates candidates)
-                  (cons candidates nil)))
-               (bundle
-                (if (nucleo-completion--module-supports-bundle-p)
-                    (nucleo-completion-candidates
-                     needle cleaned ignore-case
-                     nucleo-completion-sort-ties-by-length
-                     nucleo-completion-sort-ties-alphabetically
-                     highlight-limit
-                     return-all-scores)
-                  (let ((triples
-                         (nucleo-completion-candidates
-                          needle cleaned ignore-case
-                          nucleo-completion-sort-ties-by-length
-                          nucleo-completion-sort-ties-alphabetically
-                          highlight-limit)))
-                    (list (mapcar #'car triples)
-                          triples
-                          (when return-all-scores
-                            (mapcar #'cadr triples)))))))
-    (if map
-        (nucleo-completion--restore-bundle-candidates bundle map)
-      bundle)))
+characters before being passed to the module when
+`nucleo-completion-scrub-non-unicode-candidates' is non-nil.  When
+this option is nil and the module rejects a candidate as
+non-Unicode, this function retries once with scrubbing enabled and
+uses that path for subsequent calls.
+Original candidate strings are restored on the way back so text
+properties (Consult metadata, invisibility, faces) survive when a
+scrubbed copy was passed to the module."
+  (let ((scrub-non-unicode
+         (or nucleo-completion-scrub-non-unicode-candidates
+             nucleo-completion--force-scrub-non-unicode-candidates)))
+    (condition-case err
+        (nucleo-completion--module-results-with-scrub
+         needle candidates ignore-case highlight-limit return-all-scores
+         scrub-non-unicode)
+      (wrong-type-argument
+       (if (and (not scrub-non-unicode)
+                (nucleo-completion--module-unicode-error-p err))
+           (progn
+             (setq nucleo-completion--force-scrub-non-unicode-candidates t)
+             (nucleo-completion--module-results-with-scrub
+              needle candidates ignore-case highlight-limit return-all-scores
+              t))
+         (signal (car err) (cdr err)))))))
 
 (defun nucleo-completion--bundle-candidates (bundle)
   "Return the candidate list from BUNDLE."

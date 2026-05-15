@@ -400,16 +400,27 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (should (eq (car result) candidates))
     (should-not (cdr result))))
 
+(ert-deftest nucleo-completion-scrub-candidates-keeps-properties-when-disabled-test ()
+  (let* ((candidate (propertize "foo" 'consult-location 'marker))
+         (candidates (list candidate))
+         (nucleo-completion-scrub-non-unicode-candidates nil)
+         (nucleo-completion--force-scrub-non-unicode-candidates nil)
+         (result (nucleo-completion--scrub-candidates candidates)))
+    (should (eq (car result) candidates))
+    (should-not (cdr result))
+    (should (eq (caar result) candidate))))
+
 (ert-deftest nucleo-completion-scrub-candidates-strips-non-unicode-test ()
   (let* ((tofu (string #x200002))
          (consult-cand (concat "abc-def" tofu))
+         (nucleo-completion-scrub-non-unicode-candidates t)
          (result (nucleo-completion--scrub-candidates
                   (list "foo" consult-cand)))
          (cleaned (car result))
          (map (cdr result)))
     (should (equal cleaned '("foo" "abc-def")))
     (should map)
-    (should (equal (gethash "abc-def" map) (list consult-cand)))))
+    (should (eq (gethash (cadr cleaned) map) consult-cand))))
 
 (ert-deftest nucleo-completion-module-results-restores-original-candidates-test ()
   "Tofu-bearing candidates round-trip through the module unchanged."
@@ -459,12 +470,12 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (should (eq (caar top-info) cand-a))
         (should (eq (caadr top-info) cand-b))))))
 
-(ert-deftest nucleo-completion-module-results-skips-scrub-by-default-test ()
-  "Ordinary module calls avoid the per-candidate scrub scan by default."
+(ert-deftest nucleo-completion-module-results-skips-non-unicode-scan-by-default-test ()
+  "Ordinary module calls avoid the per-candidate non-Unicode scan by default."
   (let ((nucleo-completion-scrub-non-unicode-candidates nil))
-    (cl-letf (((symbol-function 'nucleo-completion--scrub-candidates)
+    (cl-letf (((symbol-function 'nucleo-completion--scrub-non-unicode-string)
                (lambda (_candidates)
-                 (error "Scrub should not run")))
+                 (error "Non-Unicode scrub should not run")))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
                                 _alphabetically _limit
@@ -477,6 +488,65 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                       (nucleo-completion--module-results
                        "f" '("foo" "bar") nil 0))
                      '("foo" "bar"))))))
+
+(ert-deftest nucleo-completion-module-results-retries-non-unicode-scrub-test ()
+  "Module Unicode encoder failures enable scrub retry automatically."
+  (let* ((tofu (string #x200006))
+         (consult-cand (concat "\"日本太郎\" <taro@example.invalid>" tofu))
+         (nucleo-completion-scrub-non-unicode-candidates nil)
+         (nucleo-completion--force-scrub-non-unicode-candidates nil)
+         calls received-inputs)
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (push candidates received-inputs)
+                 (setq calls (1+ (or calls 0)))
+                 (if (= calls 1)
+                     (signal 'wrong-type-argument
+                             (list 'unicode-string-p (car candidates)))
+                   (nucleo-completion-tests--bundle
+                    (mapcar (lambda (c) (list c 100 nil)) candidates)
+                    return-all-scores)))))
+      (let* ((bundle (nucleo-completion--module-results
+                      "m" (list consult-cand) nil 1 t))
+             (returned (nucleo-completion--bundle-candidates bundle)))
+        (should (= calls 2))
+        (should (equal (nreverse received-inputs)
+                       (list (list consult-cand)
+                             '("\"日本太郎\" <taro@example.invalid>"))))
+        (should nucleo-completion--force-scrub-non-unicode-candidates)
+        (should (eq (car returned) consult-cand))))))
+
+(ert-deftest nucleo-completion-module-results-keeps-propertized-candidates-test ()
+  "Propertized candidates are passed to the module unchanged."
+  (let* ((consult-cand (propertize
+                        "\"日本太郎\" <taro@example.invalid>"
+                        'consult-location 'marker
+                        'invisible t))
+         (nucleo-completion-scrub-non-unicode-candidates nil)
+         received-input)
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (setq received-input candidates)
+                 (should (eq (car candidates) consult-cand))
+                 (should (eq (get-text-property 0 'consult-location
+                                                (car candidates))
+                             'marker))
+                 (nucleo-completion-tests--bundle
+                  (mapcar (lambda (c) (list c 100 nil)) candidates)
+                  return-all-scores))))
+      (let* ((bundle (nucleo-completion--module-results
+                      "aa" (list consult-cand) nil 1 t))
+             (returned (nucleo-completion--bundle-candidates bundle))
+             (top-info (nucleo-completion--bundle-top-info bundle)))
+        (should received-input)
+        (should (eq (car returned) consult-cand))
+        (should (eq (caar top-info) consult-cand))
+        (should (eq (get-text-property 0 'consult-location (car returned))
+                    'marker))))))
 
 (ert-deftest nucleo-completion-split-scored-candidates-test ()
   (let ((nucleo-completion-long-candidate-threshold 3))
