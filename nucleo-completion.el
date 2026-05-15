@@ -60,17 +60,6 @@ ANDed together."
   :type '(repeat function)
   :group 'nucleo-completion)
 
-(defcustom nucleo-completion-persistent-regexp-cache-size nil
-  "Maximum number of regexp expander results cached across completion passes.
-When nil, regexp expander results are only cached for one
-completion pass.  When set to a positive integer, results are
-also cached across completion passes.  Set this only when your
-regexp functions return stable results for the same term,
-function list, `completion-ignore-case', and `default-directory'."
-  :type '(choice (const :tag "Disable persistent cache" nil)
-                 (natnum :tag "Maximum cached entries"))
-  :group 'nucleo-completion)
-
 (defcustom nucleo-completion-long-candidate-threshold nil
   "Maximum candidate length to score with the Rust module.
 Candidates longer than this number of characters are filtered but
@@ -79,46 +68,11 @@ matches in their original order.  Set this to nil to score every
 candidate regardless of length, which avoids an Emacs Lisp
 pre-scan over every candidate before each module call.
 
-This value also acts as the default ceiling for regexp expander
-matching and match highlighting when
-`nucleo-completion-long-candidate-regexp-threshold' or
-`nucleo-completion-long-candidate-highlight-threshold' are left
-at their `inherit' default."
+Candidates longer than this threshold also skip regexp expanders
+and match highlighting.  They still use the built-in fuzzy
+subsequence matcher during fallback filtering."
   :type '(choice (const :tag "Score every candidate" nil)
                  (natnum :tag "Maximum scored candidate length"))
-  :group 'nucleo-completion)
-
-(defcustom nucleo-completion-long-candidate-regexp-threshold 'inherit
-  "Maximum candidate length to match with regexp expanders.
-Candidates longer than this number of characters only use the
-built-in fuzzy subsequence matcher; regexps from
-`nucleo-completion-regexp-functions' are skipped during filtering
-and highlighting.
-
-When set to the symbol `inherit' (the default) the threshold
-follows `nucleo-completion-long-candidate-threshold'.  Set this
-to nil to use regexp expanders for every candidate regardless of
-length, or to a positive integer to override the inherited
-threshold."
-  :type '(choice (const :tag "Inherit from `nucleo-completion-long-candidate-threshold'"
-                        inherit)
-                 (const :tag "Use regexp expanders for every candidate" nil)
-                 (natnum :tag "Maximum regexp-expanded candidate length"))
-  :group 'nucleo-completion)
-
-(defcustom nucleo-completion-long-candidate-highlight-threshold 'inherit
-  "Maximum candidate length to highlight.
-Candidates longer than this number of characters are returned
-without match highlighting.
-
-When set to the symbol `inherit' (the default) the threshold
-follows `nucleo-completion-long-candidate-threshold'.  Set this
-to nil to highlight every candidate regardless of length, or to
-a positive integer to override the inherited threshold."
-  :type '(choice (const :tag "Inherit from `nucleo-completion-long-candidate-threshold'"
-                        inherit)
-                 (const :tag "Highlight every candidate" nil)
-                 (natnum :tag "Maximum highlighted candidate length"))
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-scrub-non-unicode-candidates nil
@@ -262,9 +216,6 @@ Each entry has the form (FILE . MESSAGE).")
 (defvar nucleo-completion--exact-word-regexp-cache nil
   "Cache for exact word regexps during one completion pass.")
 
-(defvar nucleo-completion--persistent-regexp-cache (make-hash-table :test #'equal)
-  "Cache for regexp expander results across completion passes.")
-
 (defconst nucleo-completion--directory
   (file-name-directory (or load-file-name byte-compile-current-file buffer-file-name))
   "Directory containing nucleo-completion.el.")
@@ -386,33 +337,15 @@ When CACHE is not a hash table, call PRODUCER without caching."
   (nucleo-completion--nonnegative-integer-or-nil
    nucleo-completion-long-candidate-threshold))
 
-(defun nucleo-completion--long-candidate-regexp-threshold ()
-  "Return sanitized long-candidate regexp threshold, or nil.
-When the user setting is the symbol `inherit', the value is
-resolved from `nucleo-completion-long-candidate-threshold'."
-  (nucleo-completion--nonnegative-integer-or-nil
-   (if (eq nucleo-completion-long-candidate-regexp-threshold 'inherit)
-       nucleo-completion-long-candidate-threshold
-     nucleo-completion-long-candidate-regexp-threshold)))
-
 (defun nucleo-completion--long-candidate-regexp-p (candidate)
   "Return non-nil when CANDIDATE should skip regexp expanders."
-  (let ((threshold (nucleo-completion--long-candidate-regexp-threshold)))
+  (let ((threshold (nucleo-completion--long-candidate-threshold)))
     (and threshold
          (> (length candidate) threshold))))
 
-(defun nucleo-completion--long-candidate-highlight-threshold ()
-  "Return sanitized long-candidate highlight threshold, or nil.
-When the user setting is the symbol `inherit', the value is
-resolved from `nucleo-completion-long-candidate-threshold'."
-  (nucleo-completion--nonnegative-integer-or-nil
-   (if (eq nucleo-completion-long-candidate-highlight-threshold 'inherit)
-       nucleo-completion-long-candidate-threshold
-     nucleo-completion-long-candidate-highlight-threshold)))
-
 (defun nucleo-completion--long-candidate-highlight-p (candidate)
   "Return non-nil when CANDIDATE should skip match highlighting."
-  (let ((threshold (nucleo-completion--long-candidate-highlight-threshold)))
+  (let ((threshold (nucleo-completion--long-candidate-threshold)))
     (and threshold
          (> (length candidate) threshold))))
 
@@ -566,48 +499,7 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
   (nucleo-completion--cached
    nucleo-completion--regexp-cache
    term
-   (lambda () (nucleo-completion--regexp-function-regexps-1 term))))
-
-(defun nucleo-completion--regexp-function-regexps-1 (term)
-  "Return persistent-cached extra regexps produced for TERM."
-  (let ((limit (nucleo-completion--persistent-regexp-cache-limit)))
-    (if limit
-        (let* ((key (nucleo-completion--persistent-regexp-cache-key term))
-               (cached (gethash key
-                                nucleo-completion--persistent-regexp-cache
-                                :missing)))
-          (if (not (eq cached :missing))
-              cached
-            (let ((regexps
-                   (nucleo-completion--regexp-function-regexps-uncached term)))
-              (when (> limit 0)
-                (when (>= (hash-table-count
-                           nucleo-completion--persistent-regexp-cache)
-                          limit)
-                  (nucleo-completion-clear-persistent-regexp-cache))
-                (puthash key regexps
-                         nucleo-completion--persistent-regexp-cache))
-              regexps)))
-      (nucleo-completion--regexp-function-regexps-uncached term))))
-
-(defun nucleo-completion--persistent-regexp-cache-limit ()
-  "Return sanitized persistent regexp cache size, or nil when disabled."
-  (let ((size nucleo-completion-persistent-regexp-cache-size))
-    (when (and (integerp size) (> size 0))
-      size)))
-
-(defun nucleo-completion--persistent-regexp-cache-key (term)
-  "Return persistent regexp cache key for TERM."
-  (list term
-        nucleo-completion-regexp-functions
-        completion-ignore-case
-        default-directory))
-
-;;;###autoload
-(defun nucleo-completion-clear-persistent-regexp-cache ()
-  "Clear cached regexp expander results."
-  (interactive)
-  (clrhash nucleo-completion--persistent-regexp-cache))
+   (lambda () (nucleo-completion--regexp-function-regexps-uncached term))))
 
 (defun nucleo-completion--regexp-function-regexps-uncached (term)
   "Return uncached extra regexps produced for TERM."
@@ -708,17 +600,6 @@ Honor IGNORE-CASE.  The result is an alist of (CANDIDATE . SCORE)."
 (defun nucleo-completion--module-ready-p ()
   "Return non-nil when the current Rust module provides the batch API."
   (fboundp 'nucleo-completion-candidates))
-
-(defun nucleo-completion--module-supports-bundle-p ()
-  "Return non-nil when the Rust module accepts the 7-argument bundle API.
-Also returns non-nil for variadic stubs used in tests so they
-exercise the bundle code path without re-implementing the
-six-argument adapter."
-  (let* ((arity (and (fboundp 'nucleo-completion-candidates)
-                     (func-arity 'nucleo-completion-candidates)))
-         (max-arity (and arity (cdr arity))))
-    (or (eq max-arity 'many)
-        (and (numberp max-arity) (>= max-arity 7)))))
 
 ;;;###autoload
 (defun nucleo-completion-install-module (&optional force no-confirm)
@@ -889,24 +770,13 @@ other caller."
 
 (defun nucleo-completion--call-module
     (needle candidates ignore-case highlight-limit return-all-scores)
-  "Call the Rust module and return a normalized result bundle."
-  (if (nucleo-completion--module-supports-bundle-p)
-      (nucleo-completion-candidates
-       needle candidates ignore-case
-       nucleo-completion-sort-ties-by-length
-       nucleo-completion-sort-ties-alphabetically
-       highlight-limit
-       return-all-scores)
-    (let ((triples
-           (nucleo-completion-candidates
-            needle candidates ignore-case
-            nucleo-completion-sort-ties-by-length
-            nucleo-completion-sort-ties-alphabetically
-            highlight-limit)))
-      (list (mapcar #'car triples)
-            triples
-            (when return-all-scores
-              (mapcar #'cadr triples))))))
+  "Call the Rust module and return a result bundle."
+  (nucleo-completion-candidates
+   needle candidates ignore-case
+   nucleo-completion-sort-ties-by-length
+   nucleo-completion-sort-ties-alphabetically
+   highlight-limit
+   return-all-scores))
 
 (defun nucleo-completion--module-unicode-error-p (err)
   "Return non-nil when ERR is the module string encoder rejecting input."
@@ -942,9 +812,7 @@ by the Rust module:
   FULL-SCORES  - parallel-to-CANDIDATES list of integer scores when
                  RETURN-ALL-SCORES is non-nil; otherwise nil.
 
-Honor IGNORE-CASE.  Pre-bundle Rust modules (six-argument arity)
-return a flat list of (CAND SCORE INDICES) triples; this function
-adapts that legacy shape so callers can use one bundle layout.
+Honor IGNORE-CASE.
 
 Frontends such as Consult append \"tofu\" disambiguation characters
 whose codepoints exceed Unicode's maximum, which the Rust module
@@ -1016,26 +884,17 @@ Both lists must be the same length."
 (defun nucleo-completion--regexp-only-candidates
     (needle scorable module-candidates)
   "Return SCORABLE candidates not in MODULE-CANDIDATES that match NEEDLE regexps.
-Walks SCORABLE once.  Long candidates fall back to the fuzzy
-regexp set, mirroring `nucleo-completion--regexp-filter-pairs'."
+Walk SCORABLE once."
   (let ((seen (make-hash-table :test #'equal
                                :size (max 1 (length module-candidates))))
         (case-fold-search completion-ignore-case)
         (regexp-groups (nucleo-completion--term-regexp-groups needle))
-        fuzzy-regexp-groups
         result)
     (dolist (candidate module-candidates)
       (puthash candidate t seen))
     (dolist (candidate scorable)
       (unless (gethash candidate seen)
-        (when (nucleo-completion--regexp-match-p
-               (if (nucleo-completion--long-candidate-regexp-p candidate)
-                   (or fuzzy-regexp-groups
-                       (setq fuzzy-regexp-groups
-                             (nucleo-completion--term-regexp-groups
-                              needle t)))
-                 regexp-groups)
-               candidate)
+        (when (nucleo-completion--regexp-match-p regexp-groups candidate)
           (push candidate result))))
     (nreverse result)))
 

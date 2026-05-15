@@ -143,16 +143,9 @@ By default, every candidate is scored by the Rust module without an Emacs Lisp
 length pre-scan.  Set ~nucleo-completion-long-candidate-threshold~ to an integer
 to keep unusually long candidates from dominating scoring time: candidates
 longer than the threshold are filtered but not scored by the Rust module, then
-appended after scored matches in their original order.
-
-Candidates longer than ~nucleo-completion-long-candidate-regexp-threshold~
-characters skip regexp expanders such as Migemo during filtering and
-highlighting.  They still use the built-in fuzzy subsequence matcher.  Set the
-option to nil to apply regexp expanders to every candidate regardless of length.
-
-Candidates longer than ~nucleo-completion-long-candidate-highlight-threshold~
-characters skip match highlighting.  Set the option to nil to highlight every
-candidate regardless of length.
+appended after scored matches in their original order.  The same threshold also
+skips regexp expanders and match highlighting for those long candidates, while
+the built-in fuzzy subsequence matcher still filters them.
 
 By default, candidates are sent to the Rust module as-is so ordinary completion
 tables avoid an extra Emacs Lisp scan over every candidate.  If the module
@@ -184,12 +177,6 @@ are preserved.
 If Emacs' built-in ~completion-flex-nospace~ is non-nil, ~nucleo~ follows
 ~flex~ and declines inputs containing spaces.  This lets later entries in
 ~completion-styles~ handle those inputs.
-
-For expensive expanders that return stable results, such as a simple
-~migemo-get-pattern~ wrapper, ~nucleo-completion-persistent-regexp-cache-size~
-can cache expander results across completion passes.  Keep it disabled when an
-expander depends on mutable state that is not represented by the term, function
-list, ~completion-ignore-case~, or ~default-directory~.
 
 The Rust module returns each candidate together with its score and the match
 indices chosen by ~nucleo-matcher~ for the top highlighted candidates, so the
@@ -347,20 +334,6 @@ a regexp string, a list of regexp strings, or nil.
 Regexp expander results are cached for each completion pass, so user
 configuration normally does not need its own per-term cache.
 
-If an expander is still expensive across repeated completion passes, enable the
-bounded persistent cache:
-
-#+begin_src emacs-lisp
-  (setq nucleo-completion-persistent-regexp-cache-size 1024)
-#+end_src
-
-This cache is opt-in because generic regexp expanders can depend on external
-state.  Clear it manually after changing dictionaries or expander settings:
-
-#+begin_src emacs-lisp
-  (nucleo-completion-clear-persistent-regexp-cache)
-#+end_src
-
 Migemo example:
 
 #+begin_src emacs-lisp
@@ -388,8 +361,6 @@ Complete ~use-package~ example with Migemo and Corfu:
     (setopt completion-styles '(nucleo basic))
 
     (with-eval-after-load 'migemo
-      (setq nucleo-completion-persistent-regexp-cache-size 1024)
-
       (defun my-nucleo-completion-migemo-regexp (term)
         (when (not (string-empty-p term))
           (let ((regexp (downcase (migemo-get-pattern term))))

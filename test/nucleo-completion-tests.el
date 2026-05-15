@@ -278,10 +278,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((members (get 'nucleo-completion 'custom-group)))
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
-                      nucleo-completion-persistent-regexp-cache-size
                       nucleo-completion-long-candidate-threshold
-                      nucleo-completion-long-candidate-regexp-threshold
-                      nucleo-completion-long-candidate-highlight-threshold
                       nucleo-completion-scrub-non-unicode-candidates
                       nucleo-completion-sort-ties-by-length
                       nucleo-completion-sort-ties-alphabetically
@@ -294,6 +291,12 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                       nucleo-completion-module-release-tag
                       nucleo-completion-module-install-policy))
       (should (member (list symbol 'custom-variable) members)))))
+
+(ert-deftest nucleo-completion-removed-optimization-options-test ()
+  (dolist (symbol '(nucleo-completion-persistent-regexp-cache-size
+                    nucleo-completion-long-candidate-regexp-threshold
+                    nucleo-completion-long-candidate-highlight-threshold))
+    (should-not (custom-variable-p symbol))))
 
 (ert-deftest nucleo-completion-highlight-limit-sanitizes-test ()
   (let ((nucleo-completion-max-highlighted-completions 3))
@@ -329,50 +332,6 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (should-not (nucleo-completion--long-candidate-threshold)))
   (let ((nucleo-completion-long-candidate-threshold 'invalid))
     (should-not (nucleo-completion--long-candidate-threshold))))
-
-(ert-deftest nucleo-completion-long-candidate-regexp-threshold-sanitizes-test ()
-  (let ((nucleo-completion-long-candidate-regexp-threshold 3))
-    (should (= (nucleo-completion--long-candidate-regexp-threshold) 3)))
-  (let ((nucleo-completion-long-candidate-regexp-threshold nil))
-    (should-not (nucleo-completion--long-candidate-regexp-threshold)))
-  (let ((nucleo-completion-long-candidate-regexp-threshold -1))
-    (should-not (nucleo-completion--long-candidate-regexp-threshold)))
-  (let ((nucleo-completion-long-candidate-regexp-threshold 'invalid))
-    (should-not (nucleo-completion--long-candidate-regexp-threshold))))
-
-(ert-deftest nucleo-completion-long-candidate-highlight-threshold-sanitizes-test ()
-  (let ((nucleo-completion-long-candidate-highlight-threshold 3))
-    (should (= (nucleo-completion--long-candidate-highlight-threshold) 3)))
-  (let ((nucleo-completion-long-candidate-highlight-threshold nil))
-    (should-not (nucleo-completion--long-candidate-highlight-threshold)))
-  (let ((nucleo-completion-long-candidate-highlight-threshold -1))
-    (should-not (nucleo-completion--long-candidate-highlight-threshold)))
-  (let ((nucleo-completion-long-candidate-highlight-threshold 'invalid))
-    (should-not (nucleo-completion--long-candidate-highlight-threshold))))
-
-(ert-deftest nucleo-completion-long-candidate-regexp-threshold-inherit-test ()
-  "When set to `inherit', the regexp threshold follows the main one."
-  (let ((nucleo-completion-long-candidate-threshold 7)
-        (nucleo-completion-long-candidate-regexp-threshold 'inherit))
-    (should (= (nucleo-completion--long-candidate-regexp-threshold) 7)))
-  (let ((nucleo-completion-long-candidate-threshold nil)
-        (nucleo-completion-long-candidate-regexp-threshold 'inherit))
-    (should-not (nucleo-completion--long-candidate-regexp-threshold)))
-  (let ((nucleo-completion-long-candidate-threshold 9)
-        (nucleo-completion-long-candidate-regexp-threshold 4))
-    (should (= (nucleo-completion--long-candidate-regexp-threshold) 4))))
-
-(ert-deftest nucleo-completion-long-candidate-highlight-threshold-inherit-test ()
-  "When set to `inherit', the highlight threshold follows the main one."
-  (let ((nucleo-completion-long-candidate-threshold 7)
-        (nucleo-completion-long-candidate-highlight-threshold 'inherit))
-    (should (= (nucleo-completion--long-candidate-highlight-threshold) 7)))
-  (let ((nucleo-completion-long-candidate-threshold nil)
-        (nucleo-completion-long-candidate-highlight-threshold 'inherit))
-    (should-not (nucleo-completion--long-candidate-highlight-threshold)))
-  (let ((nucleo-completion-long-candidate-threshold 9)
-        (nucleo-completion-long-candidate-highlight-threshold 4))
-    (should (= (nucleo-completion--long-candidate-highlight-threshold) 4))))
 
 (ert-deftest nucleo-completion-unicode-string-p-test ()
   (should (nucleo-completion--unicode-string-p ""))
@@ -600,6 +559,15 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                     "fb" '("foobar" "fxxx" "foo-baz" "" "fb") nil)
                    '("fb" "foo-baz" "foobar")))))
 
+(ert-deftest nucleo-completion-requires-bundle-module-api-test ()
+  (cl-letf (((symbol-function 'nucleo-completion-candidates)
+             (lambda (_needle _candidates _ignore-case _by-length
+                              _alphabetically _limit)
+               nil)))
+    (should-error
+     (nucleo-completion--call-module "fb" '("fb") nil 0 nil)
+     :type 'wrong-number-of-arguments)))
+
 (ert-deftest nucleo-completion-module-path-sanitizes-highlight-limit-test ()
   (let ((completion-ignore-case nil)
         (nucleo-completion-max-highlighted-completions -10))
@@ -643,7 +611,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 
 (ert-deftest nucleo-completion-long-candidates-skip-regexp-expanders-test ()
   (let ((completion-ignore-case nil)
-        (nucleo-completion-long-candidate-regexp-threshold 2)
+        (nucleo-completion-long-candidate-threshold 2)
         (nucleo-completion-regexp-functions
          (list (lambda (term)
                  (when (string= term "jp")
@@ -657,7 +625,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 
 (ert-deftest nucleo-completion-long-candidates-skip-regexp-highlight-test ()
   (let ((completion-ignore-case nil)
-        (nucleo-completion-long-candidate-regexp-threshold 2)
+        (nucleo-completion-long-candidate-threshold 2)
         (nucleo-completion-regexp-functions
          (list (lambda (term)
                  (when (string= term "jp")
@@ -668,7 +636,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (nucleo-completion-highlight "jp" (copy-sequence "日本語"))))))
 
 (ert-deftest nucleo-completion-long-candidates-skip-match-highlight-test ()
-  (let ((nucleo-completion-long-candidate-highlight-threshold 3))
+  (let ((nucleo-completion-long-candidate-threshold 3))
     (should-not
      (get-text-property
       0 'face
@@ -676,7 +644,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 
 (ert-deftest nucleo-completion-fuzzy-only-regexp-groups-are-lazy-test ()
   (let ((completion-ignore-case nil)
-        (nucleo-completion-long-candidate-regexp-threshold 100)
+        (nucleo-completion-long-candidate-threshold 100)
         (calls 0)
         (original (symbol-function 'nucleo-completion--term-regexp-groups)))
     (cl-letf (((symbol-function 'nucleo-completion--term-regexp-groups)
@@ -871,12 +839,10 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                      '("日本語" "nihon-go")))
       (should (= nucleo-completion-tests--regexp-calls 1)))))
 
-(ert-deftest nucleo-completion-persistent-regexp-cache-disabled-by-default-test ()
+(ert-deftest nucleo-completion-regexp-functions-not-cached-between-completions-test ()
   (let ((nucleo-completion-tests--regexp-calls 0)
-        (nucleo-completion-persistent-regexp-cache-size nil)
         (nucleo-completion-regexp-functions
          (list #'nucleo-completion-tests--nihon-regexp)))
-    (nucleo-completion-clear-persistent-regexp-cache)
     (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
                (lambda () nil)))
       (nucleo-completion-all-completions
@@ -884,44 +850,6 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (nucleo-completion-all-completions
        "nihon" '("日本語" "nihon-go" "英語"))
       (should (= nucleo-completion-tests--regexp-calls 2)))))
-
-(ert-deftest nucleo-completion-persistent-regexp-cache-test ()
-  (let ((nucleo-completion-tests--regexp-calls 0)
-        (nucleo-completion-persistent-regexp-cache-size 1024)
-        (nucleo-completion-regexp-functions
-         (list #'nucleo-completion-tests--nihon-regexp)))
-    (nucleo-completion-clear-persistent-regexp-cache)
-    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
-               (lambda () nil)))
-      (should (equal (nucleo-completion-tests--plain
-                      (nucleo-completion-all-completions
-                       "nihon" '("日本語" "nihon-go" "英語")))
-                     '("日本語" "nihon-go")))
-      (should (equal (nucleo-completion-tests--plain
-                      (nucleo-completion-all-completions
-                       "nihon" '("日本語" "nihon-go" "英語")))
-                     '("日本語" "nihon-go")))
-      (should (= nucleo-completion-tests--regexp-calls 1)))))
-
-(ert-deftest nucleo-completion-persistent-regexp-cache-keys-function-list-test ()
-  (let ((nucleo-completion-persistent-regexp-cache-size 1024)
-        (calls-a 0)
-        (calls-b 0))
-    (nucleo-completion-clear-persistent-regexp-cache)
-    (let ((nucleo-completion-regexp-functions
-           (list (lambda (_term)
-                   (setq calls-a (1+ calls-a))
-                   "日本"))))
-      (should (equal (nucleo-completion--regexp-function-regexps "nihon")
-                     '("日本"))))
-    (let ((nucleo-completion-regexp-functions
-           (list (lambda (_term)
-                   (setq calls-b (1+ calls-b))
-                   "語"))))
-      (should (equal (nucleo-completion--regexp-function-regexps "nihon")
-                     '("語"))))
-    (should (= calls-a 1))
-    (should (= calls-b 1))))
 
 (ert-deftest nucleo-completion-regexp-functions-buffer-local-disable-test ()
   (let ((nucleo-completion-regexp-functions

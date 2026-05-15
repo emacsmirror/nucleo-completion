@@ -69,24 +69,12 @@ load 時には network access を行わない。
 - ~nucleo-completion-regexp-functions~
    - 各検索 term を追加 regexp に展開する関数リスト。
    - Migemo や pyim などの言語固有 matcher は本体へ直接組み込まず、ユーザー設定でこの hook に登録する。
-- ~nucleo-completion-persistent-regexp-cache-size~
-   - 既定値は nil で、regexp expander の結果は completion pass 内だけ cache する。
-   - 正の整数が設定された場合、term、関数リスト、~completion-ignore-case~、
-     ~default-directory~ を key にして completion pass をまたいで cache する。
-   - expander が key に含まれない可変状態へ依存する場合は使わない。
 - ~nucleo-completion-long-candidate-threshold~
    - Rust module で score する候補の最大文字数を指定する。
    - 既定値は nil で、候補長に関係なくすべて score する。
    - 整数を設定した場合だけ、候補を Rust module に渡す前に Emacs Lisp 側で候補長を走査する。
    - しきい値を超える候補は score/sort せず、filter だけを行い、score 済み候補の後ろへ入力順で追加する。
-- ~nucleo-completion-long-candidate-regexp-threshold~
-   - regexp expander を適用する候補の最大文字数を指定する。
-   - 既定値は ~inherit~ で、既定では nil と同じく候補長に関係なく regexp expander を適用する。
-   - しきい値を超える候補は ~nucleo-completion-regexp-functions~ 由来の regexp を filter と highlight の両方で使わず、組み込み fuzzy subsequence matcher だけを使う。
-- ~nucleo-completion-long-candidate-highlight-threshold~
-   - match highlight を適用する候補の最大文字数を指定する。
-   - 既定値は ~inherit~ で、既定では nil と同じく候補長に関係なく match highlight を適用する。
-   - しきい値を超える候補は候補文字列を走査する match highlight を省略する。
+   - 同じしきい値を超える候補では regexp expander と match highlight も省略し、組み込み fuzzy subsequence matcher だけで filter する。
 - ~nucleo-completion-sort-ties-by-length~
    - Nucleo score が同じ候補を、短い候補が先になるように並び替えるかを指定する。
 - ~nucleo-completion-sort-ties-alphabetically~
@@ -258,12 +246,6 @@ filtering/scoring を行う。module が fuzzy match として返した候補に
 これにより、Migemo/pyim など大きい regexp を生成する expander で候補全体を毎回
 走査する負荷を減らす。
 
-~nucleo-completion-persistent-regexp-cache-size~ が正の整数の場合、
-~nucleo-completion-regexp-functions~ の結果を completion pass をまたいで cache する。
-cache entry 数が上限に達した場合は cache 全体を clear してから新しい結果を保存する。
-辞書や expander の設定を変更したユーザーは
-~nucleo-completion-clear-persistent-regexp-cache~ で明示的に cache を破棄できる。
-
 ~nucleo-completion-sort-ties-by-length~ または
 ~nucleo-completion-sort-ties-alphabetically~ が有効な場合、tie sorting は Rust module
 内で行う。score 降順の後に、設定に応じて length 昇順、alphabetical 昇順、最後に
@@ -274,20 +256,14 @@ Emacs Lisp fallback では score も sort も行わない。
 事前分割は行わず、全候補を Rust module に渡す。通常の completion table ではこの
 経路が最速で、Emacs Lisp 側で候補ごとに ~length~ を取る pre-scan を避けられる。
 non-nil の場合だけ、しきい値を超える候補は Rust module に渡さず、Emacs Lisp 側の
-fuzzy/regexp filter だけで一致判定する。長い候補は Nucleo score、tie sorting、
+fuzzy filter だけで一致判定する。長い候補は Nucleo score、tie sorting、
 score-band highlight の対象外とし、通常の score 済み候補の後ろに入力順で追加する。
 これにより、非常に長い行が少数含まれる completion table で module scoring が
 候補全文を走査して停止時間を伸ばすことを避ける。
 
-~nucleo-completion-long-candidate-regexp-threshold~ が non-nil の場合、しきい値を
-超える候補には ~nucleo-completion-regexp-functions~ 由来の regexp を適用しない。
-これにより、Migemo/pyim など大きな regexp を非常に長い行へ適用して Emacs Lisp 側
-の filter/highlight が停止時間を伸ばすことを避ける。長い候補でも組み込み fuzzy
-subsequence matcher には引き続きかける。
-
-~nucleo-completion-long-candidate-highlight-threshold~ が non-nil の場合、
-しきい値を超える候補には match highlight を適用しない。これにより、非常に長い
-候補に対して eager highlight や lazy highlight が候補全文を走査することを避ける。
+同じしきい値を超える候補には ~nucleo-completion-regexp-functions~ 由来の regexp と
+match highlight も適用しない。長い候補でも組み込み fuzzy subsequence matcher には
+引き続きかける。
 
 * GitHub Actions
 
@@ -352,8 +328,6 @@ lazy highlight をサポートする UI では ~completion-lazy-hilit-fn~ を設
 - 空入力では独自 scoring/filtering を行わず、既存 completion metadata の sort 関数を尊重する。
 - ~completion-flex-nospace~ が non-nil の場合、空白を含む入力は ~nucleo~ が候補を返さない。
 - 無効 regexp、nil、非文字列を返す regexp function は無視する。
-- persistent regexp cache は既定で無効にし、有効時も上限を持つ。
-- persistent regexp cache は nil 結果も cache し、同じ key で失敗を繰り返さない。
 - regexp expander でしか一致しない候補は、Rust module sorting 後も落とさない。
 - regexp expander でしか一致しない候補は、辞書一致として Nucleo-scored 候補の前に昇格する。
 - regexp expander でしか一致しない候補には、score band highlight で high-score face を使う。
@@ -412,8 +386,6 @@ ERT では次を検証する。
 - highlight
 - score band highlight
 - highlight 件数と score ratio の境界値正規化
-- 長い候補を module scoring から除外して filter のみ行う挙動
-- 長い候補で regexp expander filter/highlight を省略する挙動
-- 長い候補で match highlight を省略する挙動
+- 長い候補を module scoring から除外し、regexp expander と match highlight も省略する挙動
 - Customize group 登録
 - regexp expander match highlight
