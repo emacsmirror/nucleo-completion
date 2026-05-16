@@ -71,11 +71,14 @@ Emacs 起動後に新しい module を使う。
 - ~nucleo-completion-regexp-functions~
    - 各検索 term を追加 regexp に展開する関数リスト。
    - Migemo や pyim などの言語固有 matcher は本体へ直接組み込まず、ユーザー設定でこの hook に登録する。
+- ~nucleo-completion-sort-ties-by-history~
+   - Nucleo score が同じ候補を、現在の minibuffer history で最近使われた候補が先になるように並び替えるかを指定する。
+   - history entry は completion boundary の prefix を除いた候補文字列として比較する。
 - ~nucleo-completion-sort-ties-by-length~
    - Nucleo score が同じ候補を、短い候補が先になるように並び替えるかを指定する。
 - ~nucleo-completion-sort-ties-alphabetically~
    - Nucleo score が同じ候補をアルファベット順に並び替えるかを指定する。
-   - ~nucleo-completion-sort-ties-by-length~ も有効な場合は、長さで比較した後にアルファベット順を使う。
+   - 履歴 sorting、~nucleo-completion-sort-ties-by-length~ も有効な場合は、履歴、長さ、アルファベット順の順に比較する。
 - ~nucleo-completion-highlight-score-bands~
    - 候補全体の face を score band ごとに変えるかを指定する。
    - 既定値は nil で、既存の match 部分 highlight のみを行う。
@@ -111,6 +114,9 @@ Rust dynamic module がロードされた場合、次の関数が利用可能に
    - ~indices~ は ~highlight limit~ 件までの上位候補だけに付与し、Nucleo が選んだ一致位置の文字 index リストとする。
    - full score が要求された場合、候補リスト内の返却文字列には ~nucleo-completion-score~
      text property として score を付与する。
+- ~nucleo-completion-candidates-with-history~
+   - ~nucleo-completion-candidates~ と同じ結果を返すが、candidate list と平行な history rank list も受け取る。
+   - history rank は Nucleo score が同じ候補の tie-breaker としてだけ使う。
 
 * Matching Semantics
 
@@ -247,11 +253,16 @@ filtering/scoring を行う。module が fuzzy match として返した候補に
 これにより、Migemo/pyim など大きい regexp を生成する expander で候補全体を毎回
 走査する負荷を減らす。
 
-~nucleo-completion-sort-ties-by-length~ または
+~nucleo-completion-sort-ties-by-history~、
+~nucleo-completion-sort-ties-by-length~、または
 ~nucleo-completion-sort-ties-alphabetically~ が有効な場合、tie sorting は Rust module
-内で行う。score 降順の後に、設定に応じて length 昇順、alphabetical 昇順、最後に
-元の index 昇順で安定した順序にする。Rust module が利用できない場合の
-Emacs Lisp fallback では score も sort も行わない。
+内で行う。score 降順の後に、設定に応じて history rank 昇順、length 昇順、
+alphabetical 昇順、最後に元の index 昇順で安定した順序にする。history rank は
+現在の ~minibuffer-history-variable~ の値から Emacs Lisp 側で構築し、completion
+boundary の prefix を除いた candidate 文字列と比較する。
+古い Rust module が history-aware API を持たない場合は、full score を要求して
+Emacs Lisp 側で同じ score の候補だけ history rank で並び替える。
+Rust module が利用できない場合の Emacs Lisp fallback では score も sort も行わない。
 
 候補長に基づく事前分割は行わず、全候補を Rust module に渡す。通常の completion
 table ではこの経路が最速で、Emacs Lisp 側で候補ごとに ~length~ を取る pre-scan と、
@@ -324,6 +335,7 @@ lazy highlight をサポートする UI では ~completion-lazy-hilit-fn~ を設
 - regexp expander でしか一致しない候補は、辞書一致として Nucleo-scored 候補の前に昇格する。
 - regexp expander でしか一致しない候補には、score band highlight で high-score face を使う。
 - 同点 sorting は Nucleo score が同じ候補にだけ適用し、異なる score の順序は維持する。
+- history sorting は minibuffer history がない通常バッファ補完では no-op とする。
 - Rust module がない場合も、Elisp fallback により絞り込みは行う。ただし fallback は
   入力順を保ち、score、sort、score band highlight は行わない。
 - case sensitivity は ~completion-ignore-case~ に従う。
@@ -375,6 +387,7 @@ ERT では次を検証する。
 - regexp-only match preservation
 - fallback filter-only behavior
 - metadata adjustment
+- history tie sorting と通常バッファ補完での no-op
 - highlight
 - score band highlight
 - highlight 件数と score ratio の境界値正規化

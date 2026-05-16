@@ -28,6 +28,8 @@
 
 (declare-function completion--merge-suffix "minibuffer")
 (declare-function nucleo-completion-candidates "nucleo-completion-module")
+(declare-function nucleo-completion-candidates-with-history
+                  "nucleo-completion-module")
 (declare-function mm-destroy-parts "mm-decode")
 (declare-function mm-dissect-buffer "mm-decode")
 (declare-function mm-save-part-to-file "mm-decode")
@@ -36,6 +38,8 @@
 (defvar completion-flex-nospace)
 (defvar completion-lazy-hilit-fn)
 (defvar completion-regexp-list)
+(defvar minibuffer-default)
+(defvar minibuffer-history-variable)
 (defvar url-http-codes)
 (defvar url-http-response-status)
 
@@ -78,6 +82,14 @@ and keeps that path for subsequent calls."
 
 (defvar nucleo-completion--force-scrub-non-unicode-candidates nil
   "Non-nil after the module rejects a candidate as non-Unicode.")
+
+(defcustom nucleo-completion-sort-ties-by-history nil
+  "Whether to sort equal-scoring Nucleo matches by minibuffer history.
+When non-nil, candidates found earlier in the current minibuffer
+history come first.  This only affects candidates with the same
+Nucleo score."
+  :type 'boolean
+  :group 'nucleo-completion)
 
 (defcustom nucleo-completion-sort-ties-by-length nil
   "Whether to sort equal-scoring Nucleo matches by candidate length.
@@ -534,21 +546,27 @@ least one regexp from every group."
 (defun nucleo-completion--module-filter (needle candidates ignore-case)
   "Filter and sort CANDIDATES against NEEDLE with the Rust module.
 Honor IGNORE-CASE."
-  (car (nucleo-completion--module-results needle candidates ignore-case 0)))
+  (let ((completion-ignore-case ignore-case))
+    (car (nucleo-completion--module-completion-results
+          "" needle candidates nil 0 nil))))
 
 (defun nucleo-completion--module-filter-with-scores
     (needle candidates ignore-case)
   "Filter CANDIDATES against NEEDLE with the Rust module and keep scores.
 Honor IGNORE-CASE.  The result is an alist of (CANDIDATE . SCORE)."
-  (let* ((bundle (nucleo-completion--module-results
-                  needle candidates ignore-case 0 t))
-         (cands (nth 0 bundle))
-         (scores (nth 2 bundle)))
-    (cl-mapcar #'cons cands scores)))
+  (let ((completion-ignore-case ignore-case))
+    (pcase-let ((`(,cands ,_bundle ,_top-info ,scores)
+                 (nucleo-completion--module-completion-results
+                  "" needle candidates nil 0 t)))
+      (cl-mapcar #'cons cands scores))))
 
 (defun nucleo-completion--module-ready-p ()
   "Return non-nil when the current Rust module provides the batch API."
   (fboundp 'nucleo-completion-candidates))
+
+(defun nucleo-completion--module-supports-history-p ()
+  "Return non-nil when the Rust module supports history tie sorting."
+  (fboundp 'nucleo-completion-candidates-with-history))
 
 ;;;###autoload
 (defun nucleo-completion-install-module (&optional force no-confirm)
@@ -745,16 +763,27 @@ other caller."
   bundle)
 
 (defun nucleo-completion--call-module
-    (needle candidates ignore-case highlight-limit return-all-scores)
+    (needle candidates ignore-case highlight-limit return-all-scores
+            &optional history-ranks)
   "Call the Rust module for NEEDLE and CANDIDATES.
-IGNORE-CASE, HIGHLIGHT-LIMIT, and RETURN-ALL-SCORES are passed
-through to the module.  Return a result bundle."
-  (nucleo-completion-candidates
-   needle candidates ignore-case
-   nucleo-completion-sort-ties-by-length
-   nucleo-completion-sort-ties-alphabetically
-   highlight-limit
-   return-all-scores))
+IGNORE-CASE, HIGHLIGHT-LIMIT, RETURN-ALL-SCORES, and optional
+HISTORY-RANKS are passed through to the module.  Return a result
+bundle."
+  (if (and history-ranks
+           (nucleo-completion--module-supports-history-p))
+      (nucleo-completion-candidates-with-history
+       needle candidates ignore-case
+       nucleo-completion-sort-ties-by-length
+       nucleo-completion-sort-ties-alphabetically
+       history-ranks
+       highlight-limit
+       return-all-scores)
+    (nucleo-completion-candidates
+     needle candidates ignore-case
+     nucleo-completion-sort-ties-by-length
+     nucleo-completion-sort-ties-alphabetically
+     highlight-limit
+     return-all-scores)))
 
 (defun nucleo-completion--module-unicode-error-p (err)
   "Return non-nil when ERR is the module string encoder rejecting input."
@@ -763,23 +792,25 @@ through to the module.  Return a result bundle."
 
 (defun nucleo-completion--module-results-with-scrub
     (needle candidates ignore-case highlight-limit return-all-scores
-            scrub-non-unicode)
+            scrub-non-unicode &optional history-ranks)
   "Return module result bundle for NEEDLE, scrubbing CANDIDATES.
 IGNORE-CASE, HIGHLIGHT-LIMIT, and RETURN-ALL-SCORES are passed to
-the module.  SCRUB-NON-UNICODE selects the candidate scrub path."
+the module.  SCRUB-NON-UNICODE selects the candidate scrub path.
+HISTORY-RANKS, when non-nil, is parallel to CANDIDATES."
   (pcase-let* ((`(,cleaned . ,map)
                 (nucleo-completion--scrub-candidates
                  candidates scrub-non-unicode))
                (bundle
                 (nucleo-completion--call-module
                  needle cleaned ignore-case highlight-limit
-                 return-all-scores)))
+                 return-all-scores history-ranks)))
     (if map
         (nucleo-completion--restore-bundle-candidates bundle map)
       bundle)))
 
 (defun nucleo-completion--module-results
-    (needle candidates ignore-case highlight-limit &optional return-all-scores)
+    (needle candidates ignore-case highlight-limit
+            &optional return-all-scores history-ranks)
   "Return module result bundle for NEEDLE and CANDIDATES.
 The bundle is the list (CANDIDATES TOP-INFO FULL-SCORES) returned
 by the Rust module:
@@ -792,7 +823,9 @@ by the Rust module:
   FULL-SCORES  - parallel-to-CANDIDATES list of integer scores when
                  RETURN-ALL-SCORES is non-nil; otherwise nil.
 
-Honor IGNORE-CASE.
+Honor IGNORE-CASE.  HISTORY-RANKS, when non-nil, is a list
+parallel to CANDIDATES whose integer entries rank candidates by
+minibuffer history recency for equal-score tie sorting.
 
 Frontends such as Consult append \"tofu\" disambiguation characters
 whose codepoints exceed Unicode's maximum, which the Rust module
@@ -811,7 +844,7 @@ scrubbed copy was passed to the module."
     (condition-case err
         (nucleo-completion--module-results-with-scrub
          needle candidates ignore-case highlight-limit return-all-scores
-         scrub-non-unicode)
+         scrub-non-unicode history-ranks)
       (wrong-type-argument
        (if (and (not scrub-non-unicode)
                 (nucleo-completion--module-unicode-error-p err))
@@ -819,7 +852,7 @@ scrubbed copy was passed to the module."
              (setq nucleo-completion--force-scrub-non-unicode-candidates t)
              (nucleo-completion--module-results-with-scrub
               needle candidates ignore-case highlight-limit return-all-scores
-              t))
+              t history-ranks))
          (signal (car err) (cdr err)))))))
 
 (defun nucleo-completion--bundle-candidates (bundle)
@@ -893,6 +926,80 @@ older modules and mocked module bundles without building an
               (cl-mapcar #'nucleo-completion--propertize-score
                          candidates full-scores))))
   bundle)
+
+(defun nucleo-completion--history-rank-less-p
+    (candidate-a candidate-b rank-table)
+  "Return non-nil when CANDIDATE-A has a better history rank than CANDIDATE-B."
+  (let ((rank-a (gethash candidate-a rank-table))
+        (rank-b (gethash candidate-b rank-table)))
+    (cond
+     ((and rank-a rank-b) (< rank-a rank-b))
+     (rank-a t)
+     (rank-b nil)
+     (t nil))))
+
+(defun nucleo-completion--history-sort-before-p
+    (candidate-a score-a position-a candidate-b score-b position-b rank-table)
+  "Return non-nil when A should sort before B for history tie sorting.
+CANDIDATE-A, SCORE-A, and POSITION-A describe A.  CANDIDATE-B,
+SCORE-B, and POSITION-B describe B.  RANK-TABLE maps candidates
+to history ranks."
+  (let ((score-a (or score-a 0))
+        (score-b (or score-b 0)))
+    (cond
+     ((/= score-a score-b) (> score-a score-b))
+     ((nucleo-completion--history-rank-less-p
+       candidate-a candidate-b rank-table)
+      t)
+     ((nucleo-completion--history-rank-less-p
+       candidate-b candidate-a rank-table)
+      nil)
+     (t (< position-a position-b)))))
+
+(defun nucleo-completion--sort-top-info-ties-by-history
+    (top-info rank-table)
+  "Sort TOP-INFO by score and history rank using RANK-TABLE."
+  (mapcar
+   #'car
+   (sort
+    (cl-loop for entry in top-info
+             for position from 0
+             collect (list entry position))
+    (lambda (a b)
+      (let ((entry-a (car a))
+            (entry-b (car b)))
+        (nucleo-completion--history-sort-before-p
+         (nucleo-completion--top-info-candidate entry-a)
+         (nucleo-completion--top-info-score entry-a)
+         (cadr a)
+         (nucleo-completion--top-info-candidate entry-b)
+         (nucleo-completion--top-info-score entry-b)
+         (cadr b)
+         rank-table))))))
+
+(defun nucleo-completion--sort-bundle-ties-by-history
+    (bundle rank-table)
+  "Sort equal-score candidates in BUNDLE by history using RANK-TABLE.
+This is used for older Rust modules that do not provide the
+history-aware batch API.  BUNDLE must include FULL-SCORES."
+  (pcase-let ((`(,candidates ,top-info ,full-scores) bundle))
+    (if (or (null candidates) (null full-scores))
+        bundle
+      (let ((items
+             (sort
+              (cl-loop for candidate in candidates
+                       for score in full-scores
+                       for position from 0
+                       collect (list candidate score position))
+              (lambda (a b)
+                (nucleo-completion--history-sort-before-p
+                 (nth 0 a) (nth 1 a) (nth 2 a)
+                 (nth 0 b) (nth 1 b) (nth 2 b)
+                 rank-table)))))
+        (list (mapcar #'car items)
+              (nucleo-completion--sort-top-info-ties-by-history
+               top-info rank-table)
+              (mapcar #'cadr items))))))
 
 (defun nucleo-completion--regexp-only-candidates
     (needle scorable module-candidates)
@@ -1071,17 +1178,90 @@ currently effective `completion-regexp-list'."
     (let ((completion-regexp-list regexp-list))
       (all-completions prefix table pred))))
 
+(defun nucleo-completion--active-history-variable-p ()
+  "Return non-nil when history tie sorting has usable history state."
+  (and nucleo-completion-sort-ties-by-history
+       (minibufferp)
+       (boundp 'minibuffer-history-variable)
+       (symbolp minibuffer-history-variable)
+       (not (eq minibuffer-history-variable t))
+       (boundp minibuffer-history-variable)))
+
+(defun nucleo-completion--history-default ()
+  "Return the active minibuffer default as a string, or nil."
+  (cond
+   ((not (boundp 'minibuffer-default)) nil)
+   ((stringp minibuffer-default) minibuffer-default)
+   ((stringp (car-safe minibuffer-default)) (car minibuffer-default))))
+
+(defun nucleo-completion--history-entry-candidate (prefix entry)
+  "Return history ENTRY as a candidate relative to PREFIX, or nil."
+  (when (stringp entry)
+    (if (string-empty-p prefix)
+        entry
+      (when (string-prefix-p prefix entry)
+        (substring entry (length prefix))))))
+
+(defun nucleo-completion--history-rank-table (prefix)
+  "Return a hash table mapping history candidates under PREFIX to ranks."
+  (when (nucleo-completion--active-history-variable-p)
+    (let* ((history (symbol-value minibuffer-history-variable))
+           (entries (if (listp history) history nil))
+           (default (nucleo-completion--history-default))
+           (table (make-hash-table :test #'equal
+                                   :size (max 1 (length entries))))
+           (rank 0))
+      (dolist (entry (if default (cons default entries) entries))
+        (let ((candidate
+               (nucleo-completion--history-entry-candidate prefix entry)))
+          (when (and candidate
+                     (eq (gethash candidate table :missing) :missing))
+            (puthash candidate rank table)
+            (setq rank (1+ rank)))))
+      (when (> rank 0)
+        table))))
+
+(defun nucleo-completion--history-ranking (prefix candidates)
+  "Return (RANKS . TABLE) for CANDIDATES under PREFIX, or nil.
+RANKS is parallel to CANDIDATES and contains integers for
+history entries and nil for candidates not present in history.
+TABLE maps candidate strings to their history ranks."
+  (let ((table (nucleo-completion--history-rank-table prefix)))
+    (when table
+      (let (ranks any)
+        (dolist (candidate candidates)
+          (let ((rank (gethash candidate table)))
+            (when rank
+              (setq any t))
+            (push rank ranks)))
+        (when any
+          (cons (nreverse ranks) table))))))
+
 (defun nucleo-completion--module-completion-results
-    (needle all expanded-regexp-p highlight-limit need-full-scores)
+    (prefix needle all expanded-regexp-p highlight-limit need-full-scores)
   "Return module-backed filtering result for NEEDLE and ALL.
-When EXPANDED-REGEXP-P is non-nil, prepend regexp-only matches.
+PREFIX is used to interpret minibuffer history entries.  When
+EXPANDED-REGEXP-P is non-nil, prepend regexp-only matches.
 HIGHLIGHT-LIMIT and NEED-FULL-SCORES are passed to the module.
 The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
-  (let ((bundle (nucleo-completion--module-results
-                 needle all completion-ignore-case
-                 highlight-limit need-full-scores))
-        top-info
-        full-scores)
+  (let* ((history-ranking (nucleo-completion--history-ranking prefix all))
+         (history-ranks (car-safe history-ranking))
+         (history-rank-table (cdr-safe history-ranking))
+         (module-history-p (and history-ranks
+                                (nucleo-completion--module-supports-history-p)))
+         (need-full-scores
+          (or need-full-scores
+              (and history-ranks (not module-history-p))))
+         (bundle (nucleo-completion--module-results
+                  needle all completion-ignore-case
+                  highlight-limit need-full-scores
+                  (and module-history-p history-ranks)))
+         top-info
+         full-scores)
+    (when (and history-rank-table (not module-history-p))
+      (setq bundle
+            (nucleo-completion--sort-bundle-ties-by-history
+             bundle history-rank-table)))
     (when need-full-scores
       (setq bundle (nucleo-completion--ensure-score-properties bundle)))
     (when expanded-regexp-p
@@ -1094,18 +1274,19 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
           bundle top-info full-scores)))
 
 (defun nucleo-completion--filter-completions
-    (needle all module-p expanded-regexp-p highlight-limit need-full-scores)
+    (prefix needle all module-p expanded-regexp-p
+            highlight-limit need-full-scores)
   "Return filtered completion data for NEEDLE and ALL.
-MODULE-P selects the Rust module path.  EXPANDED-REGEXP-P,
-HIGHLIGHT-LIMIT, and NEED-FULL-SCORES are passed through when the
-module path is used.
+PREFIX is used to interpret minibuffer history entries.  MODULE-P
+selects the Rust module path.  EXPANDED-REGEXP-P, HIGHLIGHT-LIMIT,
+and NEED-FULL-SCORES are passed through when the module path is used.
 The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
   (cond
    ((or (null all) (string= needle ""))
     (list all nil nil nil))
    (module-p
     (nucleo-completion--module-completion-results
-     needle all expanded-regexp-p highlight-limit need-full-scores))
+     prefix needle all expanded-regexp-p highlight-limit need-full-scores))
    (t
     (list (nucleo-completion--fallback-filter needle all) nil nil nil))))
 
@@ -1156,6 +1337,8 @@ provide score and index data when available."
                          (nucleo-completion--top-info-score info)))
              (indices (and info
                            (nucleo-completion--top-info-indices info))))
+        (unless score
+          (setq score (nucleo-completion--candidate-score candidate)))
         (setcar cell
                 (nucleo-completion--highlight-candidate
                  needle (copy-sequence candidate) score max-score indices)))
@@ -1296,7 +1479,7 @@ TABLE is the completion table.  PRED and POINT follow
                      prefix pattern table pred completion-regexp-list)))
     (pcase-let ((`(,all ,_bundle ,_top-info ,_full-scores)
                  (nucleo-completion--filter-completions
-                  pattern all module-p expanded-regexp-p 0 nil)))
+                  prefix pattern all module-p expanded-regexp-p 0 nil)))
       (nucleo-completion--record-current-result prefix pattern all)
       (nucleo-completion--refine-try-result
        (nucleo-completion--try-result
@@ -1377,7 +1560,7 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                   nucleo-completion--current-result nil))
           (pcase-let* ((`(,all ,bundle ,top-info ,full-scores)
                         (nucleo-completion--filter-completions
-                         pattern all module-p expanded-regexp-p
+                         prefix pattern all module-p expanded-regexp-p
                          highlight-limit need-full-scores))
                        (max-score (and top-info
                                        (nucleo-completion--top-info-score

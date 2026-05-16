@@ -19,6 +19,9 @@
 (defvar completion-lazy-hilit-fn nil
   "Function used by completion UIs to lazily highlight candidates.")
 
+(defvar nucleo-completion-tests-history nil
+  "History variable used by nucleo-completion tests.")
+
 (defun nucleo-completion-tests--plain (strings)
   "Return STRINGS without text properties."
   (mapcar #'substring-no-properties strings))
@@ -329,6 +332,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
                       nucleo-completion-scrub-non-unicode-candidates
+                      nucleo-completion-sort-ties-by-history
                       nucleo-completion-sort-ties-by-length
                       nucleo-completion-sort-ties-alphabetically
                       nucleo-completion-highlight-score-bands
@@ -630,6 +634,14 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (should (equal (nucleo-completion--candidate-score
                     (copy-sequence candidate))
                    score))))
+
+(ert-deftest nucleo-completion-native-module-history-sort-test ()
+  (unless (nucleo-completion--module-supports-history-p)
+    (ert-skip "Rust module with history sorting is not available"))
+  (let ((bundle (nucleo-completion--module-results
+                 "a" '("ab" "aa" "ba") nil 0 nil '(1 0 nil))))
+    (should (equal (nucleo-completion--bundle-candidates bundle)
+                   '("aa" "ab" "ba")))))
 
 (ert-deftest nucleo-completion-requires-bundle-module-api-test ()
   (cl-letf (((symbol-function 'nucleo-completion-candidates)
@@ -1014,6 +1026,80 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (should (equal (nucleo-completion--module-filter
                       "a" '("bbb" "aa" "ccc" "aaa") nil)
                      '("aa" "aaa" "bbb" "ccc"))))))
+
+(ert-deftest nucleo-completion-history-ranking-strips-prefix-test ()
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (minibuffer-history-variable 'nucleo-completion-tests-history)
+        (nucleo-completion-tests-history
+         '("/tmp/alpha" "/var/beta" "/tmp/gamma")))
+    (cl-letf (((symbol-function 'minibufferp)
+               (lambda (&optional _buffer) t)))
+      (should (equal (car (nucleo-completion--history-ranking
+                           "/tmp/" '("beta" "gamma" "alpha")))
+                     '(nil 1 0))))))
+
+(ert-deftest nucleo-completion-history-ranking-noops-outside-minibuffer-test ()
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (minibuffer-history-variable 'nucleo-completion-tests-history)
+        (nucleo-completion-tests-history '("alpha")))
+    (cl-letf (((symbol-function 'minibufferp)
+               (lambda (&optional _buffer) nil)))
+      (should-not (nucleo-completion--history-ranking
+                   "" '("alpha"))))))
+
+(ert-deftest nucleo-completion-sort-ties-by-history-test ()
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (nucleo-completion-sort-ties-by-length nil)
+        (nucleo-completion-sort-ties-alphabetically nil)
+        (minibuffer-history-variable 'nucleo-completion-tests-history)
+        (nucleo-completion-tests-history '("alpha" "beta")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
+               (lambda () t))
+              ((symbol-function 'minibufferp)
+               (lambda (&optional _buffer) t))
+              ((symbol-function 'nucleo-completion-candidates-with-history)
+               (lambda (needle candidates ignore-case by-length alphabetically
+                               history-ranks limit &optional return-all-scores)
+                 (should (equal needle "a"))
+                 (should (equal candidates '("beta" "alpha" "aardvark")))
+                 (should-not ignore-case)
+                 (should-not by-length)
+                 (should-not alphabetically)
+                 (should (equal history-ranks '(1 0 nil)))
+                 (should (= limit 0))
+                 (nucleo-completion-tests--bundle
+                  '(("alpha" 10 nil) ("beta" 10 nil) ("aardvark" 9 nil))
+                  return-all-scores))))
+      (should (equal (nucleo-completion--module-filter
+                      "a" '("beta" "alpha" "aardvark") nil)
+                     '("alpha" "beta" "aardvark"))))))
+
+(ert-deftest nucleo-completion-sort-ties-by-history-old-module-fallback-test ()
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (nucleo-completion-sort-ties-by-length nil)
+        (nucleo-completion-sort-ties-alphabetically nil)
+        (minibuffer-history-variable 'nucleo-completion-tests-history)
+        (nucleo-completion-tests-history '("aardvark" "alpha" "beta")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
+               (lambda () nil))
+              ((symbol-function 'minibufferp)
+               (lambda (&optional _buffer) t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (needle candidates ignore-case by-length alphabetically
+                               limit &optional return-all-scores)
+                 (should (equal needle "a"))
+                 (should (equal candidates '("beta" "alpha" "aardvark")))
+                 (should-not ignore-case)
+                 (should-not by-length)
+                 (should-not alphabetically)
+                 (should (= limit 0))
+                 (should return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  '(("beta" 10 nil) ("alpha" 10 nil) ("aardvark" 9 nil))
+                  return-all-scores))))
+      (should (equal (nucleo-completion--module-filter
+                      "a" '("beta" "alpha" "aardvark") nil)
+                     '("alpha" "beta" "aardvark"))))))
 
 (ert-deftest nucleo-completion-sort-ties-with-scores-uses-module-test ()
   (let ((nucleo-completion-sort-ties-by-length t)

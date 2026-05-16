@@ -107,26 +107,55 @@ fn collect_candidates<'e>(candidates: Value<'e>) -> Result<(Vec<Value<'e>>, Vec<
     Ok((values, texts))
 }
 
+fn collect_history_ranks<'e>(history_ranks: Value<'e>) -> Result<Vec<Option<usize>>> {
+    let mut ranks = Vec::new();
+    let mut list = history_ranks;
+
+    while list.is_not_nil() {
+        let value: Value<'e> = list.car()?;
+        ranks.push(if value.is_not_nil() {
+            Some(value.into_rust()?)
+        } else {
+            None
+        });
+        list = list.cdr()?;
+    }
+
+    Ok(ranks)
+}
+
 fn score_items_with_sort(
     pattern: &Pattern,
     texts: &[String],
     sort_options: SortOptions,
+    history_ranks: Option<&[Option<usize>]>,
 ) -> Vec<ScoredIndex> {
     if texts.len() < PARALLEL_BATCH_SIZE {
-        return sort_scored(score_items_serial(pattern, texts), texts, sort_options);
+        return sort_scored(
+            score_items_serial(pattern, texts),
+            texts,
+            sort_options,
+            history_ranks,
+        );
     }
 
     let pool = matcher_pool();
     let workers = parallel_worker_count(texts.len(), pool.len());
 
     if workers == 1 {
-        return sort_scored(score_items_serial(pattern, texts), texts, sort_options);
+        return sort_scored(
+            score_items_serial(pattern, texts),
+            texts,
+            sort_options,
+            history_ranks,
+        );
     }
 
     sort_scored(
         score_items_parallel(pattern, texts, pool, workers),
         texts,
         sort_options,
+        history_ranks,
     )
 }
 
@@ -210,6 +239,7 @@ fn sort_scored(
     mut scored: Vec<ScoredIndex>,
     texts: &[String],
     sort_options: SortOptions,
+    history_ranks: Option<&[Option<usize>]>,
 ) -> Vec<ScoredIndex> {
     let lengths = sort_options.ties_by_length.then(|| {
         texts
@@ -230,6 +260,7 @@ fn sort_scored(
             b,
             texts,
             sort_options,
+            history_ranks,
             lengths.as_deref(),
             folded_texts.as_deref(),
         )
@@ -242,14 +273,33 @@ fn compare_scored(
     b: &ScoredIndex,
     texts: &[String],
     sort_options: SortOptions,
+    history_ranks: Option<&[Option<usize>]>,
     lengths: Option<&[usize]>,
     folded_texts: Option<&[String]>,
 ) -> Ordering {
     b.score
         .cmp(&a.score)
+        .then_with(|| compare_history_tie(a, b, history_ranks))
         .then_with(|| compare_length_tie(a, b, lengths))
         .then_with(|| compare_alphabetical_tie(a, b, texts, folded_texts, sort_options))
         .then_with(|| a.index.cmp(&b.index))
+}
+
+fn compare_history_tie(
+    a: &ScoredIndex,
+    b: &ScoredIndex,
+    history_ranks: Option<&[Option<usize>]>,
+) -> Ordering {
+    let Some(history_ranks) = history_ranks else {
+        return Ordering::Equal;
+    };
+
+    match (history_ranks[a.index], history_ranks[b.index]) {
+        (Some(rank_a), Some(rank_b)) => rank_a.cmp(&rank_b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 fn compare_length_tie(a: &ScoredIndex, b: &ScoredIndex, lengths: Option<&[usize]>) -> Ordering {
@@ -464,14 +514,14 @@ fn build_candidate_bundle<'e>(
 }
 
 #[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]
-#[defun]
-fn candidates<'e>(
+fn candidates_impl<'e>(
     env: &'e Env,
     pattern: String,
     candidates: Value<'e>,
     ignore_case: Value<'e>,
     sort_ties_by_length: Value<'e>,
     sort_ties_alphabetically: Value<'e>,
+    history_ranks: Option<Value<'e>>,
     highlight_limit: Value<'e>,
     return_all_scores: Value<'e>,
 ) -> Result<Value<'e>> {
@@ -483,8 +533,15 @@ fn candidates<'e>(
     let ignore_case = ignore_case.is_not_nil();
     let sort_options =
         SortOptions::from_lisp(sort_ties_by_length, sort_ties_alphabetically, ignore_case);
+    let history_ranks = match history_ranks {
+        Some(value) => {
+            let ranks = collect_history_ranks(value)?;
+            (ranks.len() == texts.len()).then_some(ranks)
+        }
+        None => None,
+    };
     let pattern = Pattern::parse(&pattern, case_matching(ignore_case), Normalization::Smart);
-    let matches = score_items_with_sort(&pattern, &texts, sort_options);
+    let matches = score_items_with_sort(&pattern, &texts, sort_options, history_ranks.as_deref());
 
     if input_pending(env)? {
         return empty_bundle(env);
@@ -498,6 +555,57 @@ fn candidates<'e>(
         &values,
         &texts,
         &matches,
+        highlight_limit,
+        return_all_scores,
+    )
+}
+
+#[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]
+#[defun]
+fn candidates<'e>(
+    env: &'e Env,
+    pattern: String,
+    candidates: Value<'e>,
+    ignore_case: Value<'e>,
+    sort_ties_by_length: Value<'e>,
+    sort_ties_alphabetically: Value<'e>,
+    highlight_limit: Value<'e>,
+    return_all_scores: Value<'e>,
+) -> Result<Value<'e>> {
+    candidates_impl(
+        env,
+        pattern,
+        candidates,
+        ignore_case,
+        sort_ties_by_length,
+        sort_ties_alphabetically,
+        None,
+        highlight_limit,
+        return_all_scores,
+    )
+}
+
+#[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]
+#[defun]
+fn candidates_with_history<'e>(
+    env: &'e Env,
+    pattern: String,
+    candidates: Value<'e>,
+    ignore_case: Value<'e>,
+    sort_ties_by_length: Value<'e>,
+    sort_ties_alphabetically: Value<'e>,
+    history_ranks: Value<'e>,
+    highlight_limit: Value<'e>,
+    return_all_scores: Value<'e>,
+) -> Result<Value<'e>> {
+    candidates_impl(
+        env,
+        pattern,
+        candidates,
+        ignore_case,
+        sort_ties_by_length,
+        sort_ties_alphabetically,
+        Some(history_ranks),
         highlight_limit,
         return_all_scores,
     )
@@ -546,6 +654,7 @@ mod tests {
                 ties_alphabetically: false,
                 ignore_case: false,
             },
+            None,
         );
 
         assert_eq!(
@@ -580,6 +689,7 @@ mod tests {
                 ties_alphabetically: true,
                 ignore_case: false,
             },
+            None,
         );
 
         assert_eq!(
@@ -621,6 +731,7 @@ mod tests {
                 ties_alphabetically: true,
                 ignore_case: false,
             },
+            None,
         );
 
         assert_eq!(
@@ -629,6 +740,46 @@ mod tests {
                 .map(|scored| scored.index)
                 .collect::<Vec<_>>(),
             vec![1, 3, 0, 2]
+        );
+    }
+
+    #[test]
+    fn sort_scored_applies_history_before_length_and_alphabetical() {
+        let texts = vec!["bbb".into(), "aa".into(), "ccc".into(), "aaa".into()];
+        let scored = vec![
+            ScoredIndex {
+                index: 0,
+                score: 10,
+            },
+            ScoredIndex {
+                index: 1,
+                score: 10,
+            },
+            ScoredIndex { index: 2, score: 9 },
+            ScoredIndex {
+                index: 3,
+                score: 10,
+            },
+        ];
+        let history_ranks = vec![Some(1), None, Some(0), Some(0)];
+
+        let sorted = sort_scored(
+            scored,
+            &texts,
+            SortOptions {
+                ties_by_length: true,
+                ties_alphabetically: true,
+                ignore_case: false,
+            },
+            Some(&history_ranks),
+        );
+
+        assert_eq!(
+            sorted
+                .into_iter()
+                .map(|scored| scored.index)
+                .collect::<Vec<_>>(),
+            vec![3, 0, 1, 2]
         );
     }
 

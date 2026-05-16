@@ -188,7 +188,8 @@ For an external benchmark comparison, see
 It includes results for ~nucleo~ alongside other Emacs completion styles such
 as ~hotfuzz~, ~fussy~, ~orderless~, and ~flex~.
 
-Tie sorting with ~nucleo-completion-sort-ties-by-length~ and
+Tie sorting with ~nucleo-completion-sort-ties-by-history~,
+~nucleo-completion-sort-ties-by-length~, and
 ~nucleo-completion-sort-ties-alphabetically~ is handled by the Rust module.
 If the module is unavailable, the package uses the simple Emacs Lisp fallback
 filter instead.  The fallback only narrows candidates; it preserves input order
@@ -206,6 +207,10 @@ By default, ~nucleo-completion~ keeps Nucleo's score order unchanged.  You can
 optionally refine candidates with the same Nucleo score:
 
 #+begin_src emacs-lisp
+  ;; In minibuffer completion, put candidates from the current history first
+  ;; when scores are equal.
+  (setq nucleo-completion-sort-ties-by-history t)
+
   ;; Put shorter candidates first when scores are equal.
   (setq nucleo-completion-sort-ties-by-length t)
 
@@ -213,8 +218,11 @@ optionally refine candidates with the same Nucleo score:
   (setq nucleo-completion-sort-ties-alphabetically t)
 #+end_src
 
-When both options are enabled, candidates are ordered by Nucleo score, then
-length, then alphabetical order.  Different Nucleo scores are not reordered.
+When all options are enabled, candidates are ordered by Nucleo score, then
+minibuffer history rank, then length, then alphabetical order.  Different
+Nucleo scores are not reordered.  History sorting only affects minibuffer
+completion with an active history variable; ordinary buffer completion keeps
+the Nucleo order unless the length or alphabetical tie-breakers apply.
 
 * Score Band Highlighting
 
@@ -240,90 +248,6 @@ not conflict with completion UI selection highlights or color themes.
 At runtime, invalid highlight counts are treated as 0 and score ratios are
 clamped to the 0.0 to 1.0 range, so accidental bad values do not break
 completion filtering.
-
-* History Sorting
-
-~nucleo-completion~ can be combined with Emacs' standard completion metadata.
-For example, ~savehist~ can persist minibuffer histories, and
-~completion-category-overrides~ can use those histories as a final display sort.
-Candidates that are not in the history keep their ~nucleo~ order.
-
-Corfu users can keep Nucleo's score order while still promoting candidates from
-~corfu-history~ by using a stable history sort as
-~corfu-sort-override-function~:
-
-#+begin_src emacs-lisp
-  (with-eval-after-load 'corfu
-    (defun my-corfu-nucleo-history-sort (candidates)
-      "Apply display-sort-function, then promote Corfu history."
-      (let* ((display-sort-func (corfu--metadata-get 'display-sort-function))
-             (candidates
-              (if display-sort-func
-                  (funcall display-sort-func candidates)
-                candidates)))
-        (if (and (boundp 'corfu-history) corfu-history)
-            (let ((rank (make-hash-table :test #'equal)))
-              (cl-loop for item in corfu-history
-                       for i from 0
-                       unless (gethash item rank)
-                       do (puthash item i rank))
-              (cl-stable-sort
-               candidates
-               (lambda (a b)
-                 (< (gethash (substring-no-properties a)
-                             rank most-positive-fixnum)
-                    (gethash (substring-no-properties b)
-                             rank most-positive-fixnum)))))
-          candidates)))
-
-    (setopt corfu-sort-override-function #'my-corfu-nucleo-history-sort))
-#+end_src
-
-This differs from applying ~corfu-sort-function~ after
-~display-sort-function~.  ~corfu-history-mode~ overrides
-~corfu-sort-function~ with a sorter that uses length/alphabetical order for
-ties, which can reorder candidates that Nucleo already sorted by score.  The
-example above only promotes history matches; candidates with the same history
-rank, including candidates not found in history, keep their existing Nucleo
-order.
-
-This example sorts ~M-x~ candidates by ~extended-command-history~:
-
-#+begin_src emacs-lisp
-  (require 'cl-lib)
-
-  (savehist-mode 1)
-
-  (defun my-nucleo-sort-by-history (history candidates)
-    (let ((rank (make-hash-table :test #'equal))
-          (i 0))
-      (dolist (item history)
-        (puthash item i rank)
-        (setq i (1+ i)))
-      (mapcar #'cdr
-              (sort (cl-loop for candidate in candidates
-                             for index from 0
-                             collect (cons index candidate))
-                    (lambda (a b)
-                      (let* ((ca (substring-no-properties (cdr a)))
-                             (cb (substring-no-properties (cdr b)))
-                             (ra (gethash ca rank most-positive-fixnum))
-                             (rb (gethash cb rank most-positive-fixnum)))
-                        (if (= ra rb)
-                            (< (car a) (car b))
-                          (< ra rb))))))))
-
-  (defun my-nucleo-sort-commands-by-history (candidates)
-    (my-nucleo-sort-by-history extended-command-history candidates))
-
-  (add-to-list 'completion-category-overrides
-               '(command
-                 (display-sort-function . my-nucleo-sort-commands-by-history)))
-#+end_src
-
-Different completion categories use different history variables. For example,
-commands use ~extended-command-history~, while file completions commonly use
-~file-name-history~.
 
 * Regexp Expanders
 
