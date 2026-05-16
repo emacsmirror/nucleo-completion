@@ -66,6 +66,9 @@ To download a prebuilt module from GitHub Releases, run:
 This command downloads only the module for the current platform after an
 explicit confirmation prompt, verifies the published SHA256 checksum, stores the
 module under ~nucleo-completion-module-directory~, and then tries to load it.
+If a Rust module is already loaded in the current Emacs process, the command
+still updates the installed file but leaves the loaded module unchanged; restart
+Emacs to use the newly installed module.
 No download happens during package installation or by default when the package
 is loaded.  By default, the command uses GitHub's latest release URL.  Set
 ~nucleo-completion-module-release-tag~ to a tag string such as ~"v0.1.10"~ to

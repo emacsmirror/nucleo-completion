@@ -559,10 +559,8 @@ FORCE, replace an existing installed module."
   (interactive "P")
   (unless (nucleo-completion--dynamic-modules-supported-p)
     (user-error "This Emacs was built without dynamic module support"))
-  (when (nucleo-completion--module-ready-p)
-    (user-error
-     "The nucleo-completion Rust module is already loaded; restart Emacs before replacing it"))
-  (let* ((triple (or (nucleo-completion--module-install-triple)
+  (let* ((module-loaded (nucleo-completion--module-ready-p))
+         (triple (or (nucleo-completion--module-install-triple)
                      (user-error
                       "No prebuilt module is published for %s"
                       system-configuration)))
@@ -597,16 +595,20 @@ FORCE, replace an existing installed module."
             (nucleo-completion--verify-sha256 module-temp checksum-temp)
             (make-directory directory t)
             (rename-file module-temp destination t)
-            (nucleo-completion--load-module)
-            (if (nucleo-completion--module-ready-p)
-                (message "nucleo-completion: installed and loaded %s"
-                         destination)
-              (display-warning
-               'nucleo-completion
-               (format
-                "Installed %s, but it could not be loaded. Check load errors."
-                destination)
-               :warning))
+            (if module-loaded
+                (message
+                 "nucleo-completion: installed %s; restart Emacs to use it"
+                 destination)
+              (nucleo-completion--load-module)
+              (if (nucleo-completion--module-ready-p)
+                  (message "nucleo-completion: installed and loaded %s"
+                           destination)
+                (display-warning
+                 'nucleo-completion
+                 (format
+                  "Installed %s, but it could not be loaded. Check load errors."
+                  destination)
+                 :warning)))
             destination)
         (when (file-exists-p module-temp)
           (delete-file module-temp))

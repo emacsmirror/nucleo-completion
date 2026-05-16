@@ -59,7 +59,9 @@ Prebuilt module を使いたいユーザー向けに、明示コマンド
 ~nucleo-completion-install-module~ を提供する。このコマンドは現在の platform 向け
 GitHub Release asset だけを取得し、SHA256 を検証してから
 ~nucleo-completion-module-directory~ 配下へ保存する。package install 時や既定の
-load 時には network access を行わない。
+load 時には network access を行わない。すでに Rust module が current Emacs process
+で loaded の場合も installed file は更新するが、loaded module は差し替えず、次回
+Emacs 起動後に新しい module を使う。
 
 ** Custom Variables
 

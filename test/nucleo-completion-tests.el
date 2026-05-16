@@ -209,6 +209,56 @@ The stub returns TRIPLES wrapped as a module-result bundle."
             (should (= (length downloads) 2))))
       (delete-directory root t))))
 
+(ert-deftest nucleo-completion-install-module-updates-loaded-module-for-restart-test ()
+  (let* ((root (make-temp-file "nucleo-completion-test-" t))
+         (nucleo-completion-module-directory
+          (expand-file-name "modules" root))
+         (system-type 'gnu/linux)
+         (system-configuration "x86_64-pc-linux-gnu")
+         (payload "new module contents")
+         (directory
+          (expand-file-name
+           "latest/x86_64-unknown-linux-gnu"
+           nucleo-completion-module-directory))
+         (destination
+          (expand-file-name "libnucleo_completion_module.so" directory))
+         downloads
+         messages)
+    (unwind-protect
+        (progn
+          (make-directory directory t)
+          (with-temp-file destination
+            (insert "old module contents"))
+          (cl-letf (((symbol-function 'nucleo-completion--download-file)
+                     (lambda (url file)
+                       (push url downloads)
+                       (with-temp-file file
+                         (insert
+                          (if (string-suffix-p ".sha256" url)
+                              (concat (secure-hash 'sha256 payload) "  asset\n")
+                            payload)))))
+                    ((symbol-function 'nucleo-completion--dynamic-modules-supported-p)
+                     (lambda () t))
+                    ((symbol-function 'nucleo-completion--load-module)
+                     (lambda ()
+                       (error "Loaded module should not be reloaded")))
+                    ((symbol-function 'nucleo-completion--module-ready-p)
+                     (lambda () t))
+                    ((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (should (equal (nucleo-completion-install-module t t)
+                           destination))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents destination)
+                             (buffer-string))
+                           payload))
+            (should (= (length downloads) 2))
+            (should (string-match-p
+                     "restart Emacs"
+                     (car messages)))))
+      (delete-directory root t))))
+
 (ert-deftest nucleo-completion-maybe-prompt-module-install-test ()
   (let ((nucleo-completion-module-install-policy 'prompt)
         (nucleo-completion--module-install-prompted nil)
