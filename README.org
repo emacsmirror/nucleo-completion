@@ -306,10 +306,17 @@ Terms are ANDed together. For each term, the built-in fuzzy subsequence matcher
 and configured regexp expanders are ORed together.
 
 When the Rust module is available, candidates that only match a configured
-regexp expander are treated as high-priority dictionary matches and are
-promoted before Nucleo-scored fuzzy matches.  When score-band highlighting is
-enabled, these regexp-only matches use the high-score face instead of being
-dimmed as low-score fuzzy matches.
+regexp expander are preserved in addition to Nucleo-scored fuzzy matches.  By
+default, regexp-only candidates containing non-ASCII characters are treated as
+high-priority dictionary matches and placed before Nucleo-scored fuzzy matches,
+while ASCII-only regexp-only candidates are placed after them.  This keeps
+cross-script Migemo/pyim matches prominent without letting broad romanized
+regexps outrank direct ASCII fuzzy matches such as command names.  Set
+~nucleo-completion-regexp-only-match-priority~ to ~before~ to promote all
+regexp-only matches, or ~after~ to append all regexp-only matches.
+
+When score-band highlighting is enabled, regexp-only matches use the high-score
+face instead of being dimmed as low-score fuzzy matches.
 
 To keep ~nucleo~ scoring in Corfu while disabling Migemo/pyim expansion there,
 make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:

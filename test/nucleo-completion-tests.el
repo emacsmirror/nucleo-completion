@@ -403,6 +403,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
                       nucleo-completion-regexp-minimum-term-length
+                      nucleo-completion-regexp-only-match-priority
                       nucleo-completion-scrub-non-unicode-candidates
                       nucleo-completion-sort-ties-by-history
                       nucleo-completion-sort-ties-by-length
@@ -439,6 +440,17 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (should (= (nucleo-completion--regexp-minimum-term-length) 2)))
   (let ((nucleo-completion-regexp-minimum-term-length 'invalid))
     (should (= (nucleo-completion--regexp-minimum-term-length) 2))))
+
+(ert-deftest nucleo-completion-regexp-only-match-priority-test ()
+  (let ((nucleo-completion-regexp-only-match-priority 'non-ascii))
+    (should (nucleo-completion--promote-regexp-only-candidate-p "日本語"))
+    (should-not
+     (nucleo-completion--promote-regexp-only-candidate-p "org-unrelated")))
+  (let ((nucleo-completion-regexp-only-match-priority 'before))
+    (should
+     (nucleo-completion--promote-regexp-only-candidate-p "org-unrelated")))
+  (let ((nucleo-completion-regexp-only-match-priority 'after))
+    (should-not (nucleo-completion--promote-regexp-only-candidate-p "日本語"))))
 
 (ert-deftest nucleo-completion-high-score-ratio-sanitizes-test ()
   (let ((nucleo-completion-high-score-ratio 0.5))
@@ -1037,6 +1049,29 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                       (nucleo-completion-all-completions
                        "nihon" '("日本語" "roman-nihon" "日本史")))
                      '("日本語" "日本史" "roman-nihon"))))))
+
+(ert-deftest nucleo-completion-sort-with-module-appends-ascii-regexp-only-matches-test ()
+  (let ((nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (when (string= term "ba")
+                   "readable")))))
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle _candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  '(("org-babel-execute" 128 nil)
+                    ("org-table-align" 96 nil))
+                  return-all-scores))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "org ba"
+                       '("save-place-forget-unreadable-files"
+                         "org-babel-execute"
+                         "org-table-align")))
+                     '("org-babel-execute"
+                       "org-table-align"
+                       "save-place-forget-unreadable-files"))))))
 
 (ert-deftest nucleo-completion-module-skips-regexp-filter-for-module-matches-test ()
   (let ((nucleo-completion-regexp-functions

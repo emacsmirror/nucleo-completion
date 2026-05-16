@@ -73,6 +73,23 @@ single-character terms too."
   :type 'natnum
   :group 'nucleo-completion)
 
+(defcustom nucleo-completion-regexp-only-match-priority 'non-ascii
+  "How to order matches found only by configured regexp expanders.
+The value `non-ascii' promotes regexp-only candidates containing
+non-ASCII characters before Nucleo-scored fuzzy matches and
+places ASCII-only regexp-only candidates after them.  This keeps
+cross-script dictionary matches prominent while preventing broad
+ASCII regexp expansions from outranking direct fuzzy matches.
+
+The value `before' promotes all regexp-only matches before
+Nucleo-scored fuzzy matches, matching earlier versions'
+behavior.  The value `after' places all regexp-only matches after
+Nucleo-scored fuzzy matches."
+  :type '(choice (const :tag "Promote non-ASCII regexp-only matches" non-ascii)
+                 (const :tag "Promote all regexp-only matches" before)
+                 (const :tag "Append all regexp-only matches" after))
+  :group 'nucleo-completion)
+
 (defcustom nucleo-completion-scrub-non-unicode-candidates nil
   "Whether to strip non-Unicode codepoints before calling the Rust module.
 Some frontends append disambiguation characters above Unicode's
@@ -994,7 +1011,7 @@ older modules and mocked module bundles without building an
 
 (defun nucleo-completion--history-rank-less-p
     (candidate-a candidate-b rank-table)
-  "Return non-nil when CANDIDATE-A has a better history rank than CANDIDATE-B."
+  "Return non-nil when CANDIDATE-A outranks CANDIDATE-B in RANK-TABLE."
   (let ((rank-a (gethash candidate-a rank-table))
         (rank-b (gethash candidate-b rank-table)))
     (cond
@@ -1066,6 +1083,35 @@ history-aware batch API.  BUNDLE must include FULL-SCORES."
                top-info rank-table)
               (mapcar #'cadr items))))))
 
+(defun nucleo-completion--ascii-string-p (string)
+  "Return non-nil if every character in STRING is ASCII."
+  (let ((index 0)
+        (length (length string))
+        (ascii t))
+    (while (and ascii (< index length))
+      (when (> (aref string index) #x7f)
+        (setq ascii nil))
+      (setq index (1+ index)))
+    ascii))
+
+(defun nucleo-completion--promote-regexp-only-candidate-p (candidate)
+  "Return non-nil when regexp-only CANDIDATE should precede module matches."
+  (pcase nucleo-completion-regexp-only-match-priority
+    ('before t)
+    ('after nil)
+    ('non-ascii (not (nucleo-completion--ascii-string-p candidate)))
+    (_ (not (nucleo-completion--ascii-string-p candidate)))))
+
+(defun nucleo-completion--split-regexp-only-candidates (candidates)
+  "Split regexp-only CANDIDATES into before- and after-module lists.
+Return (BEFORE . AFTER)."
+  (let (before after)
+    (dolist (candidate candidates)
+      (if (nucleo-completion--promote-regexp-only-candidate-p candidate)
+          (push candidate before)
+        (push candidate after)))
+    (cons (nreverse before) (nreverse after))))
+
 (defun nucleo-completion--regexp-only-candidates
     (needle scorable module-candidates)
   "Return SCORABLE candidates not in MODULE-CANDIDATES that match NEEDLE regexps.
@@ -1083,36 +1129,51 @@ Walk SCORABLE once."
           (push candidate result))))
     (nreverse result)))
 
-(defun nucleo-completion--prepend-regexp-only-matches
+(defun nucleo-completion--regexp-only-top-info (candidates score)
+  "Return synthetic top-info entries for regexp-only CANDIDATES with SCORE."
+  (mapcar (lambda (candidate) (list candidate score nil)) candidates))
+
+(defun nucleo-completion--merge-regexp-only-matches
     (needle scorable bundle)
-  "Return BUNDLE with regexp-only matches from SCORABLE prepended.
+  "Return BUNDLE merged with regexp-only matches from SCORABLE.
 NEEDLE is the current completion pattern.
 BUNDLE is (CANDIDATES TOP-INFO FULL-SCORES).  Returns a new
-bundle with the same shape.  For each prepended candidate a
+bundle with the same shape.  For each regexp-only candidate a
 synthetic top-info entry (CAND MAX-SCORE nil) is added so the
 score-band highlighter still classifies these matches in the high
 band, and FULL-SCORES, when present, is extended with MAX-SCORE
-entries to keep the parallel-array invariant."
+entries to keep the parallel-array invariant.
+
+Candidates are partitioned according to
+`nucleo-completion-regexp-only-match-priority'."
   (pcase-let* ((`(,module-candidates ,top-info ,full-scores) bundle)
                (max-score (or (and top-info
                                    (nucleo-completion--top-info-score
                                     (car top-info)))
                               1))
                (extra (nucleo-completion--regexp-only-candidates
-                       needle scorable module-candidates)))
+                       needle scorable module-candidates))
+               (`(,before . ,after)
+                (nucleo-completion--split-regexp-only-candidates extra)))
     (if (null extra)
         bundle
       (when full-scores
-        (setq extra
+        (setq before
               (mapcar (lambda (cand)
                         (nucleo-completion--propertize-score cand max-score))
-                      extra)))
-      (list (append extra module-candidates)
-            (append (mapcar (lambda (cand) (list cand max-score nil)) extra)
-                    top-info)
+                      before)
+              after
+              (mapcar (lambda (cand)
+                        (nucleo-completion--propertize-score cand max-score))
+                      after)))
+      (list (append before module-candidates after)
+            (append (nucleo-completion--regexp-only-top-info before max-score)
+                    top-info
+                    (nucleo-completion--regexp-only-top-info after max-score))
             (when full-scores
-              (append (mapcar (lambda (_) max-score) extra)
-                      full-scores))))))
+              (append (mapcar (lambda (_) max-score) before)
+                      full-scores
+                      (mapcar (lambda (_) max-score) after)))))))
 
 (defun nucleo-completion--exact-word-regexps (needle)
   "Return regexps that match NEEDLE terms as complete words."
@@ -1306,7 +1367,7 @@ TABLE maps candidate strings to their history ranks."
     (prefix needle all expanded-regexp-p highlight-limit need-full-scores)
   "Return module-backed filtering result for NEEDLE and ALL.
 PREFIX is used to interpret minibuffer history entries.  When
-EXPANDED-REGEXP-P is non-nil, prepend regexp-only matches.
+EXPANDED-REGEXP-P is non-nil, merge regexp-only matches.
 HIGHLIGHT-LIMIT and NEED-FULL-SCORES are passed to the module.
 The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
   (let* ((history-ranking (nucleo-completion--history-ranking prefix all))
@@ -1331,7 +1392,7 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
       (setq bundle (nucleo-completion--ensure-score-properties bundle)))
     (when expanded-regexp-p
       (setq bundle
-            (nucleo-completion--prepend-regexp-only-matches
+            (nucleo-completion--merge-regexp-only-matches
              needle all bundle)))
     (setq top-info (nucleo-completion--bundle-top-info bundle)
           full-scores (nucleo-completion--bundle-full-scores bundle))
