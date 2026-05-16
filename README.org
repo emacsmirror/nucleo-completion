@@ -199,8 +199,9 @@ By default, ~nucleo-completion~ keeps Nucleo's score order unchanged.  You can
 optionally refine candidates with the same Nucleo score:
 
 #+begin_src emacs-lisp
-  ;; In minibuffer completion, put candidates from the current history first
-  ;; when scores are equal.
+  ;; Put candidates from the current history first when scores are equal.
+  ;; Minibuffer completion uses the active minibuffer history variable;
+  ;; Corfu completion uses corfu-history when corfu-history-mode is enabled.
   (setq nucleo-completion-sort-ties-by-history t)
 
   ;; Put shorter candidates first when scores are equal.
@@ -211,10 +212,10 @@ optionally refine candidates with the same Nucleo score:
 #+end_src
 
 When all options are enabled, candidates are ordered by Nucleo score, then
-minibuffer history rank, then length, then alphabetical order.  Different
-Nucleo scores are not reordered.  History sorting only affects minibuffer
-completion with an active history variable; ordinary buffer completion keeps
-the Nucleo order unless the length or alphabetical tie-breakers apply.
+history rank, then length, then alphabetical order.  Different Nucleo scores
+are not reordered.  History sorting affects minibuffer completion with an
+active history variable and ordinary buffer completion when ~corfu-history-mode~
+is enabled and ~corfu-history~ is available.
 
 Tie sorting requires the Rust module.
 

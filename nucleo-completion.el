@@ -38,6 +38,8 @@
 (defvar completion-flex-nospace)
 (defvar completion-lazy-hilit-fn)
 (defvar completion-regexp-list)
+(defvar corfu-history)
+(defvar corfu-history-mode)
 (defvar minibuffer-default)
 (defvar minibuffer-history-variable)
 (defvar url-http-codes)
@@ -110,10 +112,12 @@ and keeps that path for subsequent calls."
   "Non-nil after the module rejects a candidate as non-Unicode.")
 
 (defcustom nucleo-completion-sort-ties-by-history nil
-  "Whether to sort equal-scoring Nucleo matches by minibuffer history.
-When non-nil, candidates found earlier in the current minibuffer
-history come first.  This only affects candidates with the same
-Nucleo score."
+  "Whether to sort equal-scoring Nucleo matches by completion history.
+When non-nil, candidates found earlier in the current history
+source come first.  Minibuffers use the active minibuffer history
+variable.  Ordinary buffers use `corfu-history' when
+`corfu-history-mode' is enabled.  This only affects candidates
+with the same Nucleo score."
   :type 'boolean
   :group 'nucleo-completion)
 
@@ -1125,8 +1129,12 @@ older modules and mocked module bundles without building an
 (defun nucleo-completion--history-rank-less-p
     (candidate-a candidate-b rank-table)
   "Return non-nil when CANDIDATE-A outranks CANDIDATE-B in RANK-TABLE."
-  (let ((rank-a (gethash candidate-a rank-table))
-        (rank-b (gethash candidate-b rank-table)))
+  (let ((rank-a (gethash
+                 (nucleo-completion--history-candidate-key candidate-a)
+                 rank-table))
+        (rank-b (gethash
+                 (nucleo-completion--history-candidate-key candidate-b)
+                 rank-table)))
     (cond
      ((and rank-a rank-b) (< rank-a rank-b))
      (rank-a t)
@@ -1418,13 +1426,18 @@ currently effective `completion-regexp-list'."
       (all-completions prefix table pred))))
 
 (defun nucleo-completion--active-history-variable-p ()
-  "Return non-nil when history tie sorting has usable history state."
+  "Return non-nil when minibuffer history tie sorting has usable history state."
   (and nucleo-completion-sort-ties-by-history
        (minibufferp)
        (boundp 'minibuffer-history-variable)
        (symbolp minibuffer-history-variable)
        (not (eq minibuffer-history-variable t))
        (boundp minibuffer-history-variable)))
+
+(defun nucleo-completion--history-candidate-key (candidate)
+  "Return CANDIDATE's plain string key for history lookup."
+  (when (stringp candidate)
+    (substring-no-properties candidate)))
 
 (defun nucleo-completion--history-default ()
   "Return the active minibuffer default as a string, or nil."
@@ -1441,24 +1454,50 @@ currently effective `completion-regexp-list'."
       (when (string-prefix-p prefix entry)
         (substring entry (length prefix))))))
 
-(defun nucleo-completion--history-rank-table (prefix)
-  "Return a hash table mapping history candidates under PREFIX to ranks."
+(defun nucleo-completion--history-rank-table-from-entries (entries &optional prefix)
+  "Return a hash table mapping history ENTRIES under PREFIX to ranks."
+  (let ((table (make-hash-table :test #'equal
+                                :size (max 1 (length entries))))
+        (rank 0)
+        (prefix (or prefix "")))
+    (dolist (entry entries)
+      (let* ((entry (nucleo-completion--history-candidate-key entry))
+             (candidate (and entry
+                             (nucleo-completion--history-entry-candidate
+                              prefix entry))))
+        (when (and candidate
+                   (eq (gethash candidate table :missing) :missing))
+          (puthash candidate rank table)
+          (setq rank (1+ rank)))))
+    (when (> rank 0)
+      table)))
+
+(defun nucleo-completion--minibuffer-history-rank-table (prefix)
+  "Return a hash table mapping minibuffer history candidates to ranks."
   (when (nucleo-completion--active-history-variable-p)
     (let* ((history (symbol-value minibuffer-history-variable))
            (entries (if (listp history) history nil))
-           (default (nucleo-completion--history-default))
-           (table (make-hash-table :test #'equal
-                                   :size (max 1 (length entries))))
-           (rank 0))
-      (dolist (entry (if default (cons default entries) entries))
-        (let ((candidate
-               (nucleo-completion--history-entry-candidate prefix entry)))
-          (when (and candidate
-                     (eq (gethash candidate table :missing) :missing))
-            (puthash candidate rank table)
-            (setq rank (1+ rank)))))
-      (when (> rank 0)
-        table))))
+           (default (nucleo-completion--history-default)))
+      (nucleo-completion--history-rank-table-from-entries
+       (if default (cons default entries) entries)
+       prefix))))
+
+(defun nucleo-completion--corfu-history-rank-table ()
+  "Return a hash table mapping Corfu history candidates to ranks."
+  (when (and nucleo-completion-sort-ties-by-history
+             (not (minibufferp))
+             (bound-and-true-p corfu-history-mode)
+             (boundp 'corfu-history)
+             (listp corfu-history))
+    (nucleo-completion--history-rank-table-from-entries corfu-history)))
+
+(defun nucleo-completion--history-rank-table (prefix)
+  "Return a hash table mapping available history candidates to ranks.
+PREFIX is used to interpret minibuffer history entries.  Ordinary
+buffer completion uses `corfu-history' without prefix stripping
+when `corfu-history-mode' is enabled."
+  (or (nucleo-completion--minibuffer-history-rank-table prefix)
+      (nucleo-completion--corfu-history-rank-table)))
 
 (defun nucleo-completion--history-ranking (prefix candidates)
   "Return (RANKS . TABLE) for CANDIDATES under PREFIX, or nil.
@@ -1469,7 +1508,9 @@ TABLE maps candidate strings to their history ranks."
     (when table
       (let (ranks any)
         (dolist (candidate candidates)
-          (let ((rank (gethash candidate table)))
+          (let ((rank (gethash
+                       (nucleo-completion--history-candidate-key candidate)
+                       table)))
             (when rank
               (setq any t))
             (push rank ranks)))

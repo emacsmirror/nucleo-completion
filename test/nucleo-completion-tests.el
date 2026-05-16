@@ -22,6 +22,9 @@
 (defvar nucleo-completion-tests-history nil
   "History variable used by nucleo-completion tests.")
 
+(defvar corfu-history nil)
+(defvar corfu-history-mode nil)
+
 (defun nucleo-completion-tests--plain (strings)
   "Return STRINGS without text properties."
   (mapcar #'substring-no-properties strings))
@@ -1311,6 +1314,18 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (should-not (nucleo-completion--history-ranking
                    "" '("alpha"))))))
 
+(ert-deftest nucleo-completion-history-ranking-uses-corfu-history-test ()
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (corfu-history-mode t)
+        (corfu-history '("alpha" "beta")))
+    (cl-letf (((symbol-function 'minibufferp)
+               (lambda (&rest _) nil)))
+      (should (equal (car (nucleo-completion--history-ranking
+                           "" (list "beta"
+                                    (propertize "alpha" 'face 'bold)
+                                    "aardvark")))
+                     '(1 0 nil))))))
+
 (ert-deftest nucleo-completion-sort-ties-by-history-test ()
   (let ((nucleo-completion-sort-ties-by-history t)
         (nucleo-completion-sort-ties-by-length nil)
@@ -1321,6 +1336,36 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                (lambda () t))
               ((symbol-function 'minibufferp)
                (lambda (&optional _buffer) t))
+              ((symbol-function 'nucleo-completion-candidates-with-history)
+               (lambda (needle candidates ignore-case by-length alphabetically
+                               history-ranks limit &optional return-all-scores)
+                 (should (equal needle "a"))
+                 (should (equal candidates '("beta" "alpha" "aardvark")))
+                 (should-not ignore-case)
+                 (should-not by-length)
+                 (should-not alphabetically)
+                 (should (equal history-ranks '(1 0 nil)))
+                 (should (= limit 0))
+                 (nucleo-completion-tests--bundle
+                  '(("alpha" 10 nil) ("beta" 10 nil) ("aardvark" 9 nil))
+                  return-all-scores))))
+      (should (equal (nucleo-completion--module-filter
+                      "a" '("beta" "alpha" "aardvark") nil)
+                     '("alpha" "beta" "aardvark"))))))
+
+(ert-deftest nucleo-completion-sort-ties-by-corfu-history-test ()
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (nucleo-completion-sort-ties-by-length nil)
+        (nucleo-completion-sort-ties-alphabetically nil)
+        (corfu-history-mode t)
+        (corfu-history '("alpha" "beta")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
+               (lambda () t))
+              ((symbol-function 'minibufferp)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (error "Expected history-aware module call")))
               ((symbol-function 'nucleo-completion-candidates-with-history)
                (lambda (needle candidates ignore-case by-length alphabetically
                                history-ranks limit &optional return-all-scores)
