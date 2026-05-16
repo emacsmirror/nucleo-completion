@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: GitHub Release tag to upload assets to, for example v0.1.9
+        description: GitHub Release tag to upload assets to, for example v0.1.10
         required: true
 
 jobs:
