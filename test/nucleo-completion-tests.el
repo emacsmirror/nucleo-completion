@@ -278,7 +278,6 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((members (get 'nucleo-completion 'custom-group)))
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
-                      nucleo-completion-long-candidate-threshold
                       nucleo-completion-scrub-non-unicode-candidates
                       nucleo-completion-sort-ties-by-length
                       nucleo-completion-sort-ties-alphabetically
@@ -294,6 +293,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 
 (ert-deftest nucleo-completion-removed-optimization-options-test ()
   (dolist (symbol '(nucleo-completion-persistent-regexp-cache-size
+                    nucleo-completion-long-candidate-threshold
                     nucleo-completion-long-candidate-regexp-threshold
                     nucleo-completion-long-candidate-highlight-threshold))
     (should-not (custom-variable-p symbol))))
@@ -321,17 +321,6 @@ The stub returns TRIPLES wrapped as a module-result bundle."
          (make-hash-table :test #'equal)))
     (should (eq (nucleo-completion--exact-word-regexps "foo bar")
                 (nucleo-completion--exact-word-regexps "foo bar")))))
-
-(ert-deftest nucleo-completion-long-candidate-threshold-sanitizes-test ()
-  (should-not (nucleo-completion--long-candidate-threshold))
-  (let ((nucleo-completion-long-candidate-threshold 3))
-    (should (= (nucleo-completion--long-candidate-threshold) 3)))
-  (let ((nucleo-completion-long-candidate-threshold nil))
-    (should-not (nucleo-completion--long-candidate-threshold)))
-  (let ((nucleo-completion-long-candidate-threshold -1))
-    (should-not (nucleo-completion--long-candidate-threshold)))
-  (let ((nucleo-completion-long-candidate-threshold 'invalid))
-    (should-not (nucleo-completion--long-candidate-threshold))))
 
 (ert-deftest nucleo-completion-unicode-string-p-test ()
   (should (nucleo-completion--unicode-string-p ""))
@@ -507,12 +496,6 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (should (eq (get-text-property 0 'consult-location (car returned))
                     'marker))))))
 
-(ert-deftest nucleo-completion-split-scored-candidates-test ()
-  (let ((nucleo-completion-long-candidate-threshold 3))
-    (should (equal (nucleo-completion--split-scored-candidates
-                    '("a" "abcd" "bc" "cdefg"))
-                   '(("a" "bc") ("abcd" "cdefg"))))))
-
 (ert-deftest nucleo-completion-initial-candidates-binds-regexp-list-test ()
   (let (seen-regexp-list)
     (cl-labels ((table (_string _pred action)
@@ -585,9 +568,8 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                        "fb" '("fb" "foo-baz")))
                      '("fb"))))))
 
-(ert-deftest nucleo-completion-long-candidates-skip-module-scoring-test ()
+(ert-deftest nucleo-completion-long-candidates-use-module-scoring-test ()
   (let ((completion-ignore-case nil)
-        (nucleo-completion-long-candidate-threshold 5)
         (nucleo-completion-highlight-score-bands t)
         (nucleo-completion-max-highlighted-completions 10)
         (long-match "foo-baz")
@@ -598,62 +580,17 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                (lambda (_needle candidates _ignore-case _by-length
                                 _alphabetically _limit
                                 &optional return-all-scores)
-                 (should (equal candidates '("fb")))
-                 (nucleo-completion-tests--bundle '(("fb" 100 (0 1)))
+                 (should (equal candidates (list long-match "fb" long-miss)))
+                 (nucleo-completion-tests--bundle `(("fb" 100 (0 1))
+                                                    (,long-match 10 (0 4)))
                                                   return-all-scores))))
       (let ((all (nucleo-completion-all-completions
                   "fb" (list long-match "fb" long-miss))))
         (should (equal (nucleo-completion-tests--plain all)
                        '("fb" "foo-baz")))
-        (should-not
-         (memq 'nucleo-completion-high-score-face
+        (should
+         (memq 'nucleo-completion-low-score-face
                (ensure-list (get-text-property 0 'face (cadr all)))))))))
-
-(ert-deftest nucleo-completion-long-candidates-skip-regexp-expanders-test ()
-  (let ((completion-ignore-case nil)
-        (nucleo-completion-long-candidate-threshold 2)
-        (nucleo-completion-regexp-functions
-         (list (lambda (term)
-                 (when (string= term "jp")
-                   "日本")))))
-    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
-               (lambda () nil)))
-      (should (equal (nucleo-completion-tests--plain
-                      (nucleo-completion-all-completions
-                       "jp" '("日本" "日本語" "jp-long")))
-                     '("日本" "jp-long"))))))
-
-(ert-deftest nucleo-completion-long-candidates-skip-regexp-highlight-test ()
-  (let ((completion-ignore-case nil)
-        (nucleo-completion-long-candidate-threshold 2)
-        (nucleo-completion-regexp-functions
-         (list (lambda (term)
-                 (when (string= term "jp")
-                   "日本")))))
-    (should-not
-     (get-text-property
-      0 'face
-      (nucleo-completion-highlight "jp" (copy-sequence "日本語"))))))
-
-(ert-deftest nucleo-completion-long-candidates-skip-match-highlight-test ()
-  (let ((nucleo-completion-long-candidate-threshold 3))
-    (should-not
-     (get-text-property
-      0 'face
-      (nucleo-completion-highlight "fb" (copy-sequence "foo-baz"))))))
-
-(ert-deftest nucleo-completion-fuzzy-only-regexp-groups-are-lazy-test ()
-  (let ((completion-ignore-case nil)
-        (nucleo-completion-long-candidate-threshold 100)
-        (calls 0)
-        (original (symbol-function 'nucleo-completion--term-regexp-groups)))
-    (cl-letf (((symbol-function 'nucleo-completion--term-regexp-groups)
-               (lambda (needle &optional fuzzy-only)
-                 (when fuzzy-only
-                   (setq calls (1+ calls)))
-                 (funcall original needle fuzzy-only))))
-      (nucleo-completion--regexp-filter-pairs "fb" '("fb" "foo-baz"))
-      (should (= calls 0)))))
 
 (ert-deftest nucleo-completion-interrupt-keeps-last-filtered-result-test ()
   (let ((completion-ignore-case nil)

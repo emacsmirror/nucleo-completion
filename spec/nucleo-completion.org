@@ -69,12 +69,6 @@ load 時には network access を行わない。
 - ~nucleo-completion-regexp-functions~
    - 各検索 term を追加 regexp に展開する関数リスト。
    - Migemo や pyim などの言語固有 matcher は本体へ直接組み込まず、ユーザー設定でこの hook に登録する。
-- ~nucleo-completion-long-candidate-threshold~
-   - Rust module で score する候補の最大文字数を指定する。
-   - 既定値は nil で、候補長に関係なくすべて score する。
-   - 整数を設定した場合だけ、候補を Rust module に渡す前に Emacs Lisp 側で候補長を走査する。
-   - しきい値を超える候補は score/sort せず、filter だけを行い、score 済み候補の後ろへ入力順で追加する。
-   - 同じしきい値を超える候補では regexp expander と match highlight も省略し、組み込み fuzzy subsequence matcher だけで filter する。
 - ~nucleo-completion-sort-ties-by-length~
    - Nucleo score が同じ候補を、短い候補が先になるように並び替えるかを指定する。
 - ~nucleo-completion-sort-ties-alphabetically~
@@ -252,18 +246,9 @@ filtering/scoring を行う。module が fuzzy match として返した候補に
 元の index 昇順で安定した順序にする。Rust module が利用できない場合の
 Emacs Lisp fallback では score も sort も行わない。
 
-~nucleo-completion-long-candidate-threshold~ が nil の場合、候補長に基づく
-事前分割は行わず、全候補を Rust module に渡す。通常の completion table ではこの
-経路が最速で、Emacs Lisp 側で候補ごとに ~length~ を取る pre-scan を避けられる。
-non-nil の場合だけ、しきい値を超える候補は Rust module に渡さず、Emacs Lisp 側の
-fuzzy filter だけで一致判定する。長い候補は Nucleo score、tie sorting、
-score-band highlight の対象外とし、通常の score 済み候補の後ろに入力順で追加する。
-これにより、非常に長い行が少数含まれる completion table で module scoring が
-候補全文を走査して停止時間を伸ばすことを避ける。
-
-同じしきい値を超える候補には ~nucleo-completion-regexp-functions~ 由来の regexp と
-match highlight も適用しない。長い候補でも組み込み fuzzy subsequence matcher には
-引き続きかける。
+候補長に基づく事前分割は行わず、全候補を Rust module に渡す。通常の completion
+table ではこの経路が最速で、Emacs Lisp 側で候補ごとに ~length~ を取る pre-scan と、
+長い候補だけを fallback regexp filter に回す分岐を避けられる。
 
 * GitHub Actions
 
@@ -386,6 +371,6 @@ ERT では次を検証する。
 - highlight
 - score band highlight
 - highlight 件数と score ratio の境界値正規化
-- 長い候補を module scoring から除外し、regexp expander と match highlight も省略する挙動
+- 長い候補も module scoring、regexp expander、match highlight の通常経路を使う挙動
 - Customize group 登録
 - regexp expander match highlight

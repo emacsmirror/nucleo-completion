@@ -60,21 +60,6 @@ ANDed together."
   :type '(repeat function)
   :group 'nucleo-completion)
 
-(defcustom nucleo-completion-long-candidate-threshold nil
-  "Maximum candidate length to score with the Rust module.
-Candidates longer than this number of characters are filtered but
-not scored.  Long matching candidates are appended after scored
-matches in their original order.  Set this to nil to score every
-candidate regardless of length, which avoids an Emacs Lisp
-pre-scan over every candidate before each module call.
-
-Candidates longer than this threshold also skip regexp expanders
-and match highlighting.  They still use the built-in fuzzy
-subsequence matcher during fallback filtering."
-  :type '(choice (const :tag "Score every candidate" nil)
-                 (natnum :tag "Maximum scored candidate length"))
-  :group 'nucleo-completion)
-
 (defcustom nucleo-completion-scrub-non-unicode-candidates nil
   "Whether to strip non-Unicode codepoints before calling the Rust module.
 Some frontends append disambiguation characters above Unicode's
@@ -332,23 +317,6 @@ When CACHE is not a hash table, call PRODUCER without caching."
        nucleo-completion-max-highlighted-completions)
       0))
 
-(defun nucleo-completion--long-candidate-threshold ()
-  "Return sanitized long-candidate scoring threshold, or nil."
-  (nucleo-completion--nonnegative-integer-or-nil
-   nucleo-completion-long-candidate-threshold))
-
-(defun nucleo-completion--long-candidate-regexp-p (candidate)
-  "Return non-nil when CANDIDATE should skip regexp expanders."
-  (let ((threshold (nucleo-completion--long-candidate-threshold)))
-    (and threshold
-         (> (length candidate) threshold))))
-
-(defun nucleo-completion--long-candidate-highlight-p (candidate)
-  "Return non-nil when CANDIDATE should skip match highlighting."
-  (let ((threshold (nucleo-completion--long-candidate-threshold)))
-    (and threshold
-         (> (length candidate) threshold))))
-
 (defun nucleo-completion--load-module ()
   "Load the Rust dynamic module when it is available."
   (when (and (nucleo-completion--dynamic-modules-supported-p)
@@ -512,22 +480,17 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
                    ((listp value)
                     (cl-remove-if-not #'nucleo-completion--valid-regexp-p value)))))
 
-(defun nucleo-completion--term-regexps (term &optional fuzzy-only)
-  "Return regexps that may match TERM.
-When FUZZY-ONLY is non-nil, omit regexps from
-`nucleo-completion-regexp-functions'."
+(defun nucleo-completion--term-regexps (term)
+  "Return regexps that may match TERM."
   (let ((fuzzy (concat "\\`" (nucleo-completion--subsequence-regexp term))))
-    (if fuzzy-only
-        (list fuzzy)
-      (cons fuzzy (nucleo-completion--regexp-function-regexps term)))))
+    (cons fuzzy (nucleo-completion--regexp-function-regexps term))))
 
-(defun nucleo-completion--term-regexp-groups (needle &optional fuzzy-only)
+(defun nucleo-completion--term-regexp-groups (needle)
   "Return regexp groups for NEEDLE.
 Each group corresponds to one term.  A candidate must match at
-least one regexp from every group.  When FUZZY-ONLY is non-nil,
-omit regexps from `nucleo-completion-regexp-functions'."
+least one regexp from every group."
   (mapcar (lambda (term)
-            (nucleo-completion--term-regexps term fuzzy-only))
+            (nucleo-completion--term-regexps term))
           (nucleo-completion--terms needle)))
 
 (defun nucleo-completion--expanded-regexp-p (needle)
@@ -551,32 +514,11 @@ omit regexps from `nucleo-completion-regexp-functions'."
 (defun nucleo-completion--regexp-filter-pairs (needle candidates)
   "Return CANDIDATES matching NEEDLE as (CANDIDATE . nil) pairs."
   (let ((case-fold-search completion-ignore-case)
-        (regexp-groups (nucleo-completion--term-regexp-groups needle))
-        fuzzy-regexp-groups)
+        (regexp-groups (nucleo-completion--term-regexp-groups needle)))
     (cl-loop for candidate in candidates
              when (nucleo-completion--regexp-match-p
-                   (if (nucleo-completion--long-candidate-regexp-p candidate)
-                       (or fuzzy-regexp-groups
-                           (setq fuzzy-regexp-groups
-                                 (nucleo-completion--term-regexp-groups
-                                  needle t)))
-                     regexp-groups)
-                   candidate)
+                   regexp-groups candidate)
              collect (cons candidate nil))))
-
-(defun nucleo-completion--split-scored-candidates (candidates)
-  "Return (SCORABLE LONG) candidate lists split by length.
-SCORABLE contains candidates that should be sent to the Rust
-module.  LONG contains candidates that should only be filtered."
-  (let ((threshold (nucleo-completion--long-candidate-threshold)))
-    (if (null threshold)
-        (list candidates nil)
-      (let (scorable long)
-        (dolist (candidate candidates)
-          (if (> (length candidate) threshold)
-              (push candidate long)
-            (push candidate scorable)))
-        (list (nreverse scorable) (nreverse long))))))
 
 (defun nucleo-completion--fallback-filter (needle candidates)
   "Filter CANDIDATES against NEEDLE without scoring or sorting."
@@ -1001,26 +943,24 @@ SCORE is compared to MAX-SCORE."
   "Highlight destructively the NEEDLE matches in HAYSTACK.
 When INDICES is non-nil, highlight those precomputed match
 positions instead of recomputing a subsequence match."
-  (unless (nucleo-completion--long-candidate-highlight-p haystack)
-    (let ((case-fold-search completion-ignore-case))
-      (if indices
-          (dolist (index indices)
-            (when (< index (length haystack))
-              (add-face-text-property index (1+ index)
-                                      'completions-common-part nil haystack)))
-        (dolist (term (nucleo-completion--terms needle))
-          (let ((start 0))
-            (cl-loop for ch across term
-                     for match = (string-match (regexp-quote (char-to-string ch))
-                                               haystack start)
-                     while match
-                     do (add-face-text-property match (1+ match)
-                                                'completions-common-part nil haystack)
-                     (setq start (1+ match))))))
-      (unless (nucleo-completion--long-candidate-regexp-p haystack)
-        (dolist (term (nucleo-completion--terms needle))
-          (dolist (regexp (nucleo-completion--regexp-function-regexps term))
-            (nucleo-completion--highlight-regexp regexp haystack))))))
+  (let ((case-fold-search completion-ignore-case))
+    (if indices
+        (dolist (index indices)
+          (when (< index (length haystack))
+            (add-face-text-property index (1+ index)
+                                    'completions-common-part nil haystack)))
+      (dolist (term (nucleo-completion--terms needle))
+        (let ((start 0))
+          (cl-loop for ch across term
+                   for match = (string-match (regexp-quote (char-to-string ch))
+                                             haystack start)
+                   while match
+                   do (add-face-text-property match (1+ match)
+                                              'completions-common-part nil haystack)
+                   (setq start (1+ match))))))
+    (dolist (term (nucleo-completion--terms needle))
+      (dolist (regexp (nucleo-completion--regexp-function-regexps term))
+        (nucleo-completion--highlight-regexp regexp haystack))))
   haystack)
 
 (defun nucleo-completion--highlight-candidate
@@ -1061,27 +1001,19 @@ currently effective `completion-regexp-list'."
 When EXPANDED-REGEXP-P is non-nil, prepend regexp-only matches.
 HIGHLIGHT-LIMIT and NEED-FULL-SCORES are passed to the module.
 The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
-  (pcase-let ((`(,scorable ,long)
-               (nucleo-completion--split-scored-candidates all)))
-    (let ((long-filtered (nucleo-completion--regexp-filter needle long))
-          bundle
-          top-info
-          full-scores)
-      (when scorable
-        (setq bundle (nucleo-completion--module-results
-                      needle scorable completion-ignore-case
-                      highlight-limit need-full-scores)))
-      (when (and scorable expanded-regexp-p)
-        (setq bundle
-              (nucleo-completion--prepend-regexp-only-matches
-               needle scorable (or bundle (list nil nil nil)))))
-      (when bundle
-        (setq top-info (nucleo-completion--bundle-top-info bundle)
-              full-scores (nucleo-completion--bundle-full-scores bundle)))
-      (list (append
-             (and bundle (nucleo-completion--bundle-candidates bundle))
-             long-filtered)
-            bundle top-info full-scores))))
+  (let ((bundle (nucleo-completion--module-results
+                 needle all completion-ignore-case
+                 highlight-limit need-full-scores))
+        top-info
+        full-scores)
+    (when expanded-regexp-p
+      (setq bundle
+            (nucleo-completion--prepend-regexp-only-matches
+             needle all bundle)))
+    (setq top-info (nucleo-completion--bundle-top-info bundle)
+          full-scores (nucleo-completion--bundle-full-scores bundle))
+    (list (nucleo-completion--bundle-candidates bundle)
+          bundle top-info full-scores)))
 
 (defun nucleo-completion--filter-completions
     (needle all module-p expanded-regexp-p highlight-limit need-full-scores)

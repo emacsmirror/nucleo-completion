@@ -139,13 +139,9 @@ still-running filter pass while control is in Emacs Lisp.  The Rust module call
 itself is synchronous, so a very large candidate set can still occupy Emacs
 until that module call returns.
 
-By default, every candidate is scored by the Rust module without an Emacs Lisp
-length pre-scan.  Set ~nucleo-completion-long-candidate-threshold~ to an integer
-to keep unusually long candidates from dominating scoring time: candidates
-longer than the threshold are filtered but not scored by the Rust module, then
-appended after scored matches in their original order.  The same threshold also
-skips regexp expanders and match highlighting for those long candidates, while
-the built-in fuzzy subsequence matcher still filters them.
+Every candidate is scored by the Rust module without an Emacs Lisp length
+pre-scan.  This keeps the hot path simple and avoids routing long candidates
+through the slower fallback regexp filter.
 
 By default, candidates are sent to the Rust module as-is so ordinary completion
 tables avoid an extra Emacs Lisp scan over every candidate.  If the module
