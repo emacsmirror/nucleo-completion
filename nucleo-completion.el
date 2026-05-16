@@ -201,6 +201,13 @@ Each entry has the form (FILE . MESSAGE).")
 (defvar nucleo-completion--exact-word-regexp-cache nil
   "Cache for exact word regexps during one completion pass.")
 
+(defconst nucleo-completion--score-property 'nucleo-completion-score
+  "Text property used to carry Rust scores on returned candidates.")
+
+(defconst nucleo-completion--scrub-map-pairs-key
+  'nucleo-completion--scrub-map-pairs
+  "Private key for ordered scrubbed-candidate restore pairs.")
+
 (defconst nucleo-completion--directory
   (file-name-directory (or load-file-name byte-compile-current-file buffer-file-name))
   "Directory containing nucleo-completion.el.")
@@ -678,7 +685,7 @@ is returned unchanged and MAP is nil."
              nucleo-completion--force-scrub-non-unicode-candidates)))
     (if (not scrub-non-unicode)
         (cons candidates nil)
-      (let (map cleaned)
+      (let (map cleaned pairs)
         (dolist (candidate candidates)
           (let ((scrubbed
                  (nucleo-completion--scrub-non-unicode-string candidate)))
@@ -687,12 +694,35 @@ is returned unchanged and MAP is nil."
               (unless map
                 (setq map (make-hash-table :test #'eq
                                            :size (length candidates))))
-              (puthash scrubbed candidate map))))
+              (puthash scrubbed candidate map)
+              (push (cons scrubbed candidate) pairs))))
+        (when pairs
+          (puthash nucleo-completion--scrub-map-pairs-key
+                   (nreverse pairs) map))
         (cons (if map (nreverse cleaned) candidates) map)))))
 
-(defun nucleo-completion--restore-scrubbed-candidate (candidate map)
-  "Return original candidate for scrubbed CANDIDATE using MAP."
-  (or (gethash candidate map) candidate))
+(defun nucleo-completion--scrub-map-queues (map)
+  "Return fresh equal-keyed restore queues for MAP."
+  (let ((pairs (gethash nucleo-completion--scrub-map-pairs-key map))
+        (queues (make-hash-table :test #'equal)))
+    (dolist (pair pairs)
+      (push (cdr pair) (gethash (car pair) queues)))
+    (maphash (lambda (key queue)
+               (puthash key (nreverse queue) queues))
+             queues)
+    queues))
+
+(defun nucleo-completion--restore-scrubbed-candidate
+    (candidate map &optional queues)
+  "Return original candidate for scrubbed CANDIDATE using MAP.
+QUEUES, when non-nil, restores copied scrubbed candidates in
+their original order."
+  (or (gethash candidate map)
+      (let ((queue (and queues (gethash candidate queues))))
+        (when queue
+          (puthash candidate (cdr queue) queues)
+          (car queue)))
+      candidate))
 
 (defun nucleo-completion--restore-bundle-candidates (bundle map)
   "Replace scrubbed candidates inside BUNDLE with originals from MAP.
@@ -700,19 +730,23 @@ MAP keys are the substituted plain candidate objects passed to
 the Rust module.  Mutates BUNDLE in place because the lists were
 freshly returned by the Rust module and are not shared with any
 other caller."
-  (cl-loop for cell on (nucleo-completion--bundle-candidates bundle)
-           do (setcar cell
-                      (nucleo-completion--restore-scrubbed-candidate
-                       (car cell) map)))
-  (dolist (entry (nucleo-completion--bundle-top-info bundle))
-    (setcar entry
-            (nucleo-completion--restore-scrubbed-candidate
-             (car entry) map)))
+  (let ((candidate-queues (nucleo-completion--scrub-map-queues map))
+        (top-info-queues (nucleo-completion--scrub-map-queues map)))
+    (cl-loop for cell on (nucleo-completion--bundle-candidates bundle)
+             do (setcar cell
+                        (nucleo-completion--restore-scrubbed-candidate
+                         (car cell) map candidate-queues)))
+    (dolist (entry (nucleo-completion--bundle-top-info bundle))
+      (setcar entry
+              (nucleo-completion--restore-scrubbed-candidate
+               (car entry) map top-info-queues))))
   bundle)
 
 (defun nucleo-completion--call-module
     (needle candidates ignore-case highlight-limit return-all-scores)
-  "Call the Rust module and return a result bundle."
+  "Call the Rust module for NEEDLE and CANDIDATES.
+IGNORE-CASE, HIGHLIGHT-LIMIT, and RETURN-ALL-SCORES are passed
+through to the module.  Return a result bundle."
   (nucleo-completion-candidates
    needle candidates ignore-case
    nucleo-completion-sort-ties-by-length
@@ -728,7 +762,9 @@ other caller."
 (defun nucleo-completion--module-results-with-scrub
     (needle candidates ignore-case highlight-limit return-all-scores
             scrub-non-unicode)
-  "Return module result bundle, scrubbing CANDIDATES as requested."
+  "Return module result bundle for NEEDLE, scrubbing CANDIDATES.
+IGNORE-CASE, HIGHLIGHT-LIMIT, and RETURN-ALL-SCORES are passed to
+the module.  SCRUB-NON-UNICODE selects the candidate scrub path."
   (pcase-let* ((`(,cleaned . ,map)
                 (nucleo-completion--scrub-candidates
                  candidates scrub-non-unicode))
@@ -823,6 +859,39 @@ Both lists must be the same length."
              candidates full-scores)
     table))
 
+(defun nucleo-completion--candidate-score (candidate)
+  "Return the score text property from CANDIDATE, or nil."
+  (and (stringp candidate)
+       (get-text-property 0 nucleo-completion--score-property candidate)))
+
+(defun nucleo-completion--propertize-score (candidate score)
+  "Return a copy of CANDIDATE carrying SCORE as a text property."
+  (let ((copy (copy-sequence candidate)))
+    (put-text-property 0 (length copy)
+                       nucleo-completion--score-property score copy)
+    copy))
+
+(defun nucleo-completion--score-properties-present-p (candidates full-scores)
+  "Return non-nil when CANDIDATES already carry FULL-SCORES."
+  (or (null full-scores)
+      (and candidates
+           (nucleo-completion--candidate-score (car candidates)))))
+
+(defun nucleo-completion--ensure-score-properties (bundle)
+  "Ensure BUNDLE candidates carry score text properties.
+Newer Rust modules attach scores while constructing the candidate
+list.  This fallback preserves lazy score-band highlighting with
+older modules and mocked module bundles without building an
+`equal' hash table keyed by candidate strings."
+  (let ((candidates (nucleo-completion--bundle-candidates bundle))
+        (full-scores (nucleo-completion--bundle-full-scores bundle)))
+    (unless (nucleo-completion--score-properties-present-p
+             candidates full-scores)
+      (setcar bundle
+              (cl-mapcar #'nucleo-completion--propertize-score
+                         candidates full-scores))))
+  bundle)
+
 (defun nucleo-completion--regexp-only-candidates
     (needle scorable module-candidates)
   "Return SCORABLE candidates not in MODULE-CANDIDATES that match NEEDLE regexps.
@@ -859,6 +928,11 @@ entries to keep the parallel-array invariant."
                        needle scorable module-candidates)))
     (if (null extra)
         bundle
+      (when full-scores
+        (setq extra
+              (mapcar (lambda (cand)
+                        (nucleo-completion--propertize-score cand max-score))
+                      extra)))
       (list (append extra module-candidates)
             (append (mapcar (lambda (cand) (list cand max-score nil)) extra)
                     top-info)
@@ -1006,6 +1080,8 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
                  highlight-limit need-full-scores))
         top-info
         full-scores)
+    (when need-full-scores
+      (setq bundle (nucleo-completion--ensure-score-properties bundle)))
     (when expanded-regexp-p
       (setq bundle
             (nucleo-completion--prepend-regexp-only-matches
@@ -1044,12 +1120,9 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
   "Install lazy highlighting for NEEDLE using BUNDLE metadata.
 TOP-INFO and FULL-SCORES provide score and index lookup data.
 MAX-SCORE is used for score-band classification."
+  (ignore bundle full-scores)
   (let ((info-hash (and top-info
-                        (nucleo-completion--top-info-hash top-info)))
-        (score-hash (and full-scores
-                         (nucleo-completion--full-scores-hash
-                          (nucleo-completion--bundle-candidates bundle)
-                          full-scores))))
+                        (nucleo-completion--top-info-hash top-info))))
     (setq completion-lazy-hilit-fn
           (lambda (candidate)
             (let* ((info (and info-hash
@@ -1057,8 +1130,8 @@ MAX-SCORE is used for score-band classification."
                    (score (or (and info
                                    (nucleo-completion--top-info-score
                                     info))
-                              (and score-hash
-                                   (gethash candidate score-hash))))
+                              (nucleo-completion--candidate-score
+                               candidate)))
                    (indices (and info
                                  (nucleo-completion--top-info-indices
                                   info))))

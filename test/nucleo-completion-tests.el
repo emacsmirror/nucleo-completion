@@ -418,6 +418,32 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (should (eq (caar top-info) cand-a))
         (should (eq (caadr top-info) cand-b))))))
 
+(ert-deftest nucleo-completion-module-results-restores-copied-scrubbed-candidates-test ()
+  "Copied scrubbed candidates still restore to their originals."
+  (let* ((tofu-a (string #x200007))
+         (tofu-b (string #x200008))
+         (cand-a (concat "same" tofu-a))
+         (cand-b (concat "same" tofu-b))
+         (nucleo-completion-scrub-non-unicode-candidates t))
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (let ((triples
+                        (mapcar (lambda (candidate)
+                                  (list (copy-sequence candidate) 100 nil))
+                                candidates)))
+                   (nucleo-completion-tests--bundle
+                    triples return-all-scores)))))
+      (let* ((bundle (nucleo-completion--module-results
+                      "same" (list cand-a cand-b) nil 2 t))
+             (returned (nucleo-completion--bundle-candidates bundle))
+             (top-info (nucleo-completion--bundle-top-info bundle)))
+        (should (eq (car returned) cand-a))
+        (should (eq (cadr returned) cand-b))
+        (should (eq (caar top-info) cand-a))
+        (should (eq (caadr top-info) cand-b))))))
+
 (ert-deftest nucleo-completion-module-results-skips-non-unicode-scan-by-default-test ()
   "Ordinary module calls avoid the per-candidate non-Unicode scan by default."
   (let ((nucleo-completion-scrub-non-unicode-candidates nil))
@@ -541,6 +567,19 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (should (equal (nucleo-completion--module-filter
                     "fb" '("foobar" "fxxx" "foo-baz" "" "fb") nil)
                    '("fb" "foo-baz" "foobar")))))
+
+(ert-deftest nucleo-completion-native-module-score-property-test ()
+  (unless (nucleo-completion--module-ready-p)
+    (ert-skip "Rust module is not available"))
+  (let* ((bundle (nucleo-completion--module-results
+                  "fb" '("foobar" "foo-baz" "fb") nil 0 t))
+         (candidate (car (nucleo-completion--bundle-candidates bundle)))
+         (score (car (nucleo-completion--bundle-full-scores bundle))))
+    (should (integerp score))
+    (should (equal (nucleo-completion--candidate-score candidate) score))
+    (should (equal (nucleo-completion--candidate-score
+                    (copy-sequence candidate))
+                   score))))
 
 (ert-deftest nucleo-completion-requires-bundle-module-api-test ()
   (cl-letf (((symbol-function 'nucleo-completion-candidates)
@@ -1098,6 +1137,35 @@ invocation."
       (setq calls 0)
       (funcall completion-lazy-hilit-fn (copy-sequence "foo"))
       (should (= calls 0)))))
+
+(ert-deftest nucleo-completion-lazy-score-band-uses-score-property-test ()
+  (let ((completion-ignore-case nil)
+        (completion-lazy-hilit t)
+        (nucleo-completion-highlight-score-bands t)
+        (nucleo-completion-high-score-ratio 0.85)
+        (nucleo-completion-max-highlighted-completions 1))
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle _candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (list '("foo" "fob")
+                       '(("foo" 100 (0 1)))
+                       (when return-all-scores '(100 50)))))
+              ((symbol-function 'nucleo-completion--full-scores-hash)
+               (lambda (_candidates _full-scores)
+                 (error "Full-scores hash must not be built"))))
+      (let* ((all (nucleo-completion-all-completions
+                   "fo" '("foo" "fob" "bar")))
+             (highlighted (funcall completion-lazy-hilit-fn
+                                   (copy-sequence (cadr all)))))
+        (should (equal (nucleo-completion-tests--plain all)
+                       '("foo" "fob")))
+        (should (equal (nucleo-completion--candidate-score
+                        (cadr all))
+                       50))
+        (should (memq 'nucleo-completion-low-score-face
+                      (ensure-list
+                       (get-text-property 0 'face highlighted))))))))
 
 (ert-deftest nucleo-completion-regexp-only-match-is-high-score-highlighted-test ()
   (let ((completion-ignore-case nil)

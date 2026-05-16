@@ -107,6 +107,8 @@ Rust dynamic module がロードされた場合、次の関数が利用可能に
    - pattern、candidate list、ignore-case、同点 sorting options、highlight limit を受け取る。
    - match する候補を Nucleo score 順に並べ、各 entry を ~(candidate score indices)~ として返す。
    - ~indices~ は ~highlight limit~ 件までの上位候補だけに付与し、Nucleo が選んだ一致位置の文字 index リストとする。
+   - full score が要求された場合、候補リスト内の返却文字列には ~nucleo-completion-score~
+     text property として score を付与する。
 
 * Matching Semantics
 
@@ -217,8 +219,11 @@ term を繰り返し参照しても、同じ純粋な文字列処理を再実行
 score と precomputed indices の lookup table は highlight で必要になった場合だけ
 作成する。highlight 件数が 0 で lazy highlight も無効な場合は、module 結果を
 filter/sort 済み候補リストとして使うだけにし、追加の hash table 作成を避ける。
-lazy highlight では ~equal~ hash table に候補文字列を直接 key として保存し、
-text property を取り除くための追加文字列 allocation を避ける。
+lazy highlight の score-band 判定では、Rust module が候補文字列へ付与した
+~nucleo-completion-score~ text property を使う。これにより、長い共通 prefix を持つ
+候補リストで高コストになり得る ~equal~ hash table 構築を避ける。古い module や
+test double が score property を返さない場合は、Elisp 側で候補へ score property を
+付与して同じ lazy highlight 経路を使う。
 
 ~nucleo-completion-scrub-non-unicode-candidates~ が nil の場合、Rust module に
 候補を渡す前の non-Unicode codepoint 走査は行わない。通常の completion table は

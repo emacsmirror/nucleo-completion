@@ -347,15 +347,52 @@ fn empty_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
 
 fn build_candidates_list<'e>(
     env: &'e Env,
+    texts: &[String],
     values: &[Value<'e>],
     matches: &[ScoredIndex],
+    attach_scores: bool,
 ) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
     let mut candidates_list = nil;
     for scored in matches.iter().rev() {
-        candidates_list = env.cons(values[scored.index], candidates_list)?;
+        let candidate = candidate_value(env, texts, values, scored, attach_scores)?;
+        candidates_list = env.cons(candidate, candidates_list)?;
     }
     Ok(candidates_list)
+}
+
+fn candidate_value<'e>(
+    env: &'e Env,
+    texts: &[String],
+    values: &[Value<'e>],
+    scored: &ScoredIndex,
+    attach_score: bool,
+) -> Result<Value<'e>> {
+    if attach_score {
+        propertized_score_candidate(
+            env,
+            values[scored.index],
+            &texts[scored.index],
+            scored.score,
+        )
+    } else {
+        Ok(values[scored.index])
+    }
+}
+
+fn propertized_score_candidate<'e>(
+    env: &'e Env,
+    value: Value<'e>,
+    text: &str,
+    score: u32,
+) -> Result<Value<'e>> {
+    let copy = env.call("copy-sequence", [value])?;
+    let start = 0.into_lisp(env)?;
+    let end = text.chars().count().into_lisp(env)?;
+    let property = env.intern("nucleo-completion-score")?;
+    let score = score.into_lisp(env)?;
+    env.call("put-text-property", [start, end, property, score, copy])?;
+    Ok(copy)
 }
 
 fn build_top_info<'e>(
@@ -420,7 +457,7 @@ fn build_candidate_bundle<'e>(
     highlight_limit: usize,
     return_all_scores: bool,
 ) -> Result<Value<'e>> {
-    let candidates_list = build_candidates_list(env, values, matches)?;
+    let candidates_list = build_candidates_list(env, texts, values, matches, return_all_scores)?;
     let top_info = build_top_info(env, pattern, texts, values, matches, highlight_limit)?;
     let full_scores = build_full_scores(env, matches, return_all_scores)?;
     build_list_3(env, candidates_list, top_info, full_scores)
