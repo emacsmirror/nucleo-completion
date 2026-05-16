@@ -111,10 +111,11 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 (ert-deftest nucleo-completion-module-candidates-test ()
   (let* ((nucleo-completion--directory "/tmp/nucleo-completion/")
          (nucleo-completion-module-directory "/tmp/nucleo-modules/")
+         (nucleo-completion-required-module-version "9.8.7")
          (system-type 'gnu/linux)
          (system-configuration "x86_64-pc-linux-gnu")
          (candidates (nucleo-completion--module-candidates)))
-    (should (member "/tmp/nucleo-modules/latest/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+    (should (member "/tmp/nucleo-modules/v9.8.7/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
                     candidates))
     (should (member "/tmp/nucleo-completion/bin/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
                     candidates))
@@ -134,18 +135,40 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (system-configuration "aarch64-unknown-linux-gnu"))
     (should-not (nucleo-completion--module-install-triple))))
 
+(ert-deftest nucleo-completion-module-release-directory-name-test ()
+  (let ((nucleo-completion-module-release-tag nil)
+        (nucleo-completion-required-module-version "9.8.7"))
+    (should (equal (nucleo-completion--module-release-directory-name)
+                   "v9.8.7")))
+  (let ((nucleo-completion-module-release-tag 'latest)
+        (nucleo-completion-required-module-version "9.8.7"))
+    (should (equal (nucleo-completion--module-release-directory-name)
+                   "latest")))
+  (let ((nucleo-completion-module-release-tag "v1.2.3")
+        (nucleo-completion-required-module-version "9.8.7"))
+    (should (equal (nucleo-completion--module-release-directory-name)
+                   "v1.2.3"))))
+
 (ert-deftest nucleo-completion-module-asset-url-test ()
   (let ((system-type 'gnu/linux)
         (nucleo-completion-module-release-repository "example/repo")
-        (nucleo-completion-module-release-tag nil))
+        (nucleo-completion-module-release-tag nil)
+        (nucleo-completion-required-module-version "9.8.7"))
     (should (equal
              (nucleo-completion--module-asset-url
               "x86_64-unknown-linux-gnu")
-             "https://github.com/example/repo/releases/latest/download/nucleo-completion-module-x86_64-unknown-linux-gnu.so"))
+             "https://github.com/example/repo/releases/download/v9.8.7/nucleo-completion-module-x86_64-unknown-linux-gnu.so"))
     (should (equal
              (nucleo-completion--module-asset-url
               "x86_64-unknown-linux-gnu" t)
-             "https://github.com/example/repo/releases/latest/download/nucleo-completion-module-x86_64-unknown-linux-gnu.so.sha256")))
+             "https://github.com/example/repo/releases/download/v9.8.7/nucleo-completion-module-x86_64-unknown-linux-gnu.so.sha256")))
+  (let ((system-type 'gnu/linux)
+        (nucleo-completion-module-release-repository "example/repo")
+        (nucleo-completion-module-release-tag 'latest))
+    (should (equal
+             (nucleo-completion--module-asset-url
+              "x86_64-unknown-linux-gnu")
+             "https://github.com/example/repo/releases/latest/download/nucleo-completion-module-x86_64-unknown-linux-gnu.so")))
   (let ((system-type 'darwin)
         (nucleo-completion-module-release-repository "example/repo")
         (nucleo-completion-module-release-tag "v1.2.3"))
@@ -153,6 +176,38 @@ The stub returns TRIPLES wrapped as a module-result bundle."
              (nucleo-completion--module-asset-url
               "aarch64-apple-darwin")
              "https://github.com/example/repo/releases/download/v1.2.3/nucleo-completion-module-aarch64-apple-darwin.dylib"))))
+
+(ert-deftest nucleo-completion-stale-installed-module-directories-test ()
+  (let* ((root (make-temp-file "nucleo-completion-test-" t))
+         (nucleo-completion-module-directory
+          (expand-file-name "modules" root))
+         (nucleo-completion-required-module-version "9.8.7")
+         (system-type 'gnu/linux)
+         (system-configuration "x86_64-pc-linux-gnu")
+         (library "libnucleo_completion_module.so")
+         (current-dir
+          (expand-file-name
+           "v9.8.7/x86_64-unknown-linux-gnu"
+           nucleo-completion-module-directory))
+         (old-dir
+          (expand-file-name
+           "v9.8.6/x86_64-unknown-linux-gnu"
+           nucleo-completion-module-directory))
+         (latest-dir
+          (expand-file-name
+           "latest/x86_64-unknown-linux-gnu"
+           nucleo-completion-module-directory)))
+    (unwind-protect
+        (progn
+          (dolist (dir (list current-dir old-dir latest-dir))
+            (make-directory dir t)
+            (with-temp-file (expand-file-name library dir)
+              (insert "module")))
+          (let ((dirs (nucleo-completion--stale-installed-module-directories)))
+            (should (member old-dir dirs))
+            (should (member latest-dir dirs))
+            (should-not (member current-dir dirs))))
+      (delete-directory root t))))
 
 (ert-deftest nucleo-completion-download-file-reports-http-error-test ()
   (let ((buffer (generate-new-buffer " *nucleo-completion-http-error*"))
@@ -216,12 +271,13 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let* ((root (make-temp-file "nucleo-completion-test-" t))
          (nucleo-completion-module-directory
           (expand-file-name "modules" root))
+         (nucleo-completion-required-module-version "9.8.7")
          (system-type 'gnu/linux)
          (system-configuration "x86_64-pc-linux-gnu")
          (payload "new module contents")
          (directory
           (expand-file-name
-           "latest/x86_64-unknown-linux-gnu"
+           "v9.8.7/x86_64-unknown-linux-gnu"
            nucleo-completion-module-directory))
          (destination
           (expand-file-name "libnucleo_completion_module.so" directory))
@@ -305,6 +361,8 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                (lambda () ready))
               ((symbol-function 'nucleo-completion--load-module)
                (lambda () nil))
+              ((symbol-function 'nucleo-completion--current-installed-module-file)
+               (lambda () nil))
               ((symbol-function 'nucleo-completion-install-module)
                (lambda (&optional force no-confirm)
                  (setq install-args (list force no-confirm))
@@ -332,6 +390,26 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (should (commandp 'nucleo-completion-ensure-module))
       (should (eq (nucleo-completion-ensure-module) t))
       (should (equal install-args '(nil nil))))))
+
+(ert-deftest nucleo-completion-ensure-module-installs-stale-loaded-module-test ()
+  (let ((install-args nil))
+    (cl-letf (((symbol-function 'nucleo-completion--dynamic-modules-supported-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion--loaded-installed-module-stale-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion--load-module)
+               (lambda ()
+                 (error "Loaded stale module should not be loaded again")))
+              ((symbol-function 'nucleo-completion--current-installed-module-file)
+               (lambda () nil))
+              ((symbol-function 'nucleo-completion-install-module)
+               (lambda (&optional force no-confirm)
+                 (setq install-args (list force no-confirm))
+                 "/tmp/nucleo-module")))
+      (should (eq (nucleo-completion-ensure-module) t))
+      (should (equal install-args '(nil t))))))
 
 (ert-deftest nucleo-completion-maybe-prompt-module-install-test ()
   (let ((nucleo-completion-module-install-policy 'prompt)
@@ -397,6 +475,42 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (should (equal nucleo-completion-module-load-errors
                      '(("/tmp/nucleo-a.so" . "Cannot load /tmp/nucleo-a.so")
                        ("/tmp/nucleo-b.so" . "Cannot load /tmp/nucleo-b.so")))))))
+
+(ert-deftest nucleo-completion-load-module-warns-stale-installed-module-test ()
+  (let* ((root (make-temp-file "nucleo-completion-test-" t))
+         (nucleo-completion-module-directory
+          (expand-file-name "modules" root))
+         (nucleo-completion-required-module-version "9.8.7")
+         (nucleo-completion--loaded-module-file nil)
+         (nucleo-completion--stale-module-warning-shown nil)
+         (old-file
+          (expand-file-name
+           "v9.8.6/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+           nucleo-completion-module-directory))
+         warnings
+         (original-featurep (symbol-function 'featurep)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory old-file) t)
+          (with-temp-file old-file
+            (insert "module"))
+          (cl-letf (((symbol-function 'featurep)
+                     (lambda (feature &optional subfeature)
+                       (if (eq feature 'nucleo-completion-module)
+                           nil
+                         (funcall original-featurep feature subfeature))))
+                    ((symbol-function 'nucleo-completion--module-candidates)
+                     (lambda () (list old-file)))
+                    ((symbol-function 'module-load)
+                     (lambda (_file) t))
+                    ((symbol-function 'display-warning)
+                     (lambda (type message &optional level buffer-name)
+                       (push (list type message level buffer-name) warnings))))
+            (nucleo-completion--load-module)
+            (should (equal nucleo-completion--loaded-module-file old-file))
+            (should (string-match-p "expects module release v9.8.7"
+                                    (cadar warnings)))))
+      (delete-directory root t))))
 
 (ert-deftest nucleo-completion-custom-group-test ()
   (let ((members (get 'nucleo-completion 'custom-group)))

@@ -58,18 +58,21 @@ MELPA package には prebuilt dynamic module を含めない。MELPA recipe は
 Prebuilt module を使いたいユーザー向けに、明示コマンド
 ~nucleo-completion-install-module~ を提供する。このコマンドは現在の platform 向け
 GitHub Release asset だけを取得し、SHA256 を検証してから
-~nucleo-completion-module-directory~ 配下へ保存する。package install 時や既定の
-load 時には network access を行わない。すでに Rust module が current Emacs process
-で loaded の場合も installed file は更新するが、loaded module は差し替えず、次回
-Emacs 起動後に新しい module を使う。
+~nucleo-completion-module-directory/<release-tag>/<target-triple>/~ 配下へ保存する。
+既定の release tag は ~nucleo-completion-required-module-version~ に対応する
+~v<version>~ とする。package install 時や既定の load 時には network access を
+行わない。すでに Rust module が current Emacs process で loaded の場合も installed
+file は更新するが、loaded module は差し替えず、次回 Emacs 起動後に新しい module を
+使う。
 
 設定ファイルから明示的に自動 install したいユーザー向けに、
-~nucleo-completion-ensure-module~ を提供する。この関数は module API が既に使える場合は
-何もせず、未ロードの場合は既存 search path から module load を試みる。それでも
-module API が使えない場合は ~nucleo-completion-install-module~ を呼び、現在の
-platform 向け prebuilt module を install する。Lisp から呼ばれた場合は、設定に
-書いたことを明示 opt-in とみなして確認なしで install する。~M-x~ から呼ばれた場合は
-download や置き換え前に確認する。
+~nucleo-completion-ensure-module~ を提供する。この関数は module API が未ロードの場合は
+既存 search path から module load を試みる。それでも module API が使えない場合、または
+older installed release の module だけが loaded された場合は
+~nucleo-completion-install-module~ を呼び、現在の platform 向け package-matched
+prebuilt module を install する。Lisp から呼ばれた場合は、設定に書いたことを明示
+opt-in とみなして確認なしで install する。~M-x~ から呼ばれた場合は download や
+置き換え前に確認する。
 
 ** Custom Variables
 
@@ -120,7 +123,9 @@ download や置き換え前に確認する。
    - prebuilt module を取得する GitHub repository。形式は ~OWNER/REPO~。
 - ~nucleo-completion-module-release-tag~
    - prebuilt module を取得する GitHub Release tag。
-   - 既定値は nil で、GitHub の ~latest/download~ URL を使う。
+   - 既定値は nil で、~nucleo-completion-required-module-version~ に対応する
+     ~v<version>~ release asset を使う。
+   - ~latest~ を設定した場合は、GitHub の ~latest/download~ URL を使う。
    - 文字列を設定した場合は、その tag の release asset を使う。
 - ~nucleo-completion-module-install-policy~
    - 既定値は ~manual~ で、自動 prompt は出さない。
@@ -201,11 +206,15 @@ Dynamic module は次の順で探索する。
 
 1. ~locate-library~ で見つかる ~nucleo-completion-module~
 2. ~locate-library~ で見つかる platform library name
-3. ~nucleo-completion-module-directory/<release>/<target-triple>/~
+3. ~nucleo-completion-module-directory/<configured-release>/<target-triple>/~
 4. ~bin/<target-triple>/~
 5. package directory root
 6. ~target/release/~
 7. ~target/debug/~
+8. ~nucleo-completion-module-directory/<older-release>/<target-triple>/~
+
+Older installed release は fallback としてのみ使う。読み込まれた場合は session ごとに
+一度 warning を出し、package-matched module の install と Emacs restart を促す。
 
 Platform library name:
 

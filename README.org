@@ -86,10 +86,11 @@ module for the current platform from GitHub Releases, run:
 #+end_src
 
 The command asks before downloading, verifies the published SHA256 checksum,
-stores the file under ~nucleo-completion-module-directory~, and tries to load
-it.  No download happens during package installation or ordinary package load.
-If a module was already loaded in the current Emacs process, restart Emacs to
-use the newly installed file.
+stores the file under
+~nucleo-completion-module-directory/<release-tag>/<target-triple>/~, and tries
+to load it.  No download happens during package installation or ordinary
+package load.  If a module was already loaded in the current Emacs process,
+restart Emacs to use the newly installed file.
 
 To opt in to automatic install from your configuration, call:
 
@@ -97,17 +98,30 @@ To opt in to automatic install from your configuration, call:
   (nucleo-completion-ensure-module)
 #+end_src
 
-This first tries to load an already installed module.  If no module is
-available, it downloads and installs the prebuilt module for the current
-platform.  Lisp calls install without asking;
+This first tries to load an already installed module for the package-matched
+release.  If no module is available, or only an older installed module could be
+loaded, it downloads and installs the prebuilt module for the current platform.
+Lisp calls install without asking;
 ~M-x nucleo-completion-ensure-module~ asks before downloading.
 
-By default, the installer uses GitHub's latest release URL.  To pin a release,
-set ~nucleo-completion-module-release-tag~ before installing:
+By default, the installer uses the GitHub Release tag matching
+~nucleo-completion-required-module-version~.  To use GitHub's latest release
+URL instead, set ~nucleo-completion-module-release-tag~ to ~latest~:
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-module-release-tag 'latest)
+#+end_src
+
+To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
+before installing:
 
 #+begin_src emacs-lisp
   (setq nucleo-completion-module-release-tag "v0.1.11")
 #+end_src
+
+When a module from an older installed release is loaded as a fallback, a warning
+is shown once for the Emacs session so you can install the package-matched
+module and restart.
 
 Check whether the Rust module loaded with:
 

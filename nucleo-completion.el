@@ -177,10 +177,16 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
+(defconst nucleo-completion-required-module-version "0.1.11"
+  "Version of the prebuilt Rust module expected by this package.")
+
 (defcustom nucleo-completion-module-release-tag nil
   "GitHub Release tag used by `nucleo-completion-install-module'.
-When nil, the installer downloads from GitHub's latest release URL."
-  :type '(choice (const :tag "Latest release" nil)
+When nil, the installer downloads the release matching
+`nucleo-completion-required-module-version'.  The value `latest'
+uses GitHub's latest release URL."
+  :type '(choice (const :tag "Package-matched release" nil)
+                 (const :tag "Latest release" latest)
                  (string :tag "Release tag"))
   :group 'nucleo-completion)
 
@@ -217,8 +223,14 @@ never prompts."
   "Dynamic module load failures from the last load attempt.
 Each entry has the form (FILE . MESSAGE).")
 
+(defvar nucleo-completion--loaded-module-file nil
+  "File name of the dynamic module loaded by `nucleo-completion--load-module'.")
+
 (defvar nucleo-completion--module-install-prompted nil
   "Non-nil after an automatic module install prompt has been considered.")
+
+(defvar nucleo-completion--stale-module-warning-shown nil
+  "Non-nil after warning about an older installed dynamic module.")
 
 (defconst nucleo-completion--prebuilt-release-triples
   '("x86_64-unknown-linux-gnu"
@@ -304,12 +316,28 @@ When CACHE is not a hash table, call PRODUCER without caching."
             (expand-file-name (concat "bin/" triple) nucleo-completion--directory))
           (nucleo-completion--platform-triples)))
 
-(defun nucleo-completion--module-release-directory-name ()
-  "Return the local directory name for the configured module release."
+(defun nucleo-completion--required-module-release-tag ()
+  "Return the GitHub Release tag matching this package's module version."
+  (if (string-prefix-p "v" nucleo-completion-required-module-version)
+      nucleo-completion-required-module-version
+    (concat "v" nucleo-completion-required-module-version)))
+
+(defun nucleo-completion--module-latest-release-p ()
+  "Return non-nil when the installer should use GitHub's latest release URL."
+  (eq nucleo-completion-module-release-tag 'latest))
+
+(defun nucleo-completion--configured-module-release-tag ()
+  "Return the concrete GitHub Release tag selected for module install."
   (if (and (stringp nucleo-completion-module-release-tag)
            (not (string-empty-p nucleo-completion-module-release-tag)))
       nucleo-completion-module-release-tag
-    "latest"))
+    (nucleo-completion--required-module-release-tag)))
+
+(defun nucleo-completion--module-release-directory-name ()
+  "Return the local directory name for the configured module release."
+  (if (nucleo-completion--module-latest-release-p)
+      "latest"
+    (nucleo-completion--configured-module-release-tag)))
 
 (defun nucleo-completion--module-install-triple ()
   "Return the current platform triple supported by release assets."
@@ -327,11 +355,85 @@ When CACHE is not a hash table, call PRODUCER without caching."
      (nucleo-completion--module-release-directory-name)
      (file-name-as-directory nucleo-completion-module-directory)))))
 
+(defun nucleo-completion--stale-installed-module-directories ()
+  "Return installed module directories for older configured releases."
+  (let ((triple (nucleo-completion--module-install-triple)))
+    (when (and triple
+               (file-directory-p nucleo-completion-module-directory))
+      (let* ((library (nucleo-completion--rust-library-name))
+             (current (directory-file-name
+                       (nucleo-completion--module-install-directory triple))))
+        (cl-loop for release-dir in
+                 (directory-files nucleo-completion-module-directory t "\\`[^.]")
+                 for module-dir = (expand-file-name triple release-dir)
+                 for module-file = (expand-file-name library module-dir)
+                 when (and (file-readable-p module-file)
+                           (not (string= (expand-file-name module-dir)
+                                         (expand-file-name current))))
+                 collect module-dir)))))
+
 (defun nucleo-completion--installed-module-directories ()
   "Return installed module directories for the current platform."
   (let ((triple (nucleo-completion--module-install-triple)))
     (when triple
       (list (nucleo-completion--module-install-directory triple)))))
+
+(defun nucleo-completion--installed-module-release-name (file)
+  "Return the local release directory name for installed module FILE.
+Return nil when FILE is not under `nucleo-completion-module-directory'."
+  (let* ((file (expand-file-name file))
+         (triple-dir (file-name-directory file))
+         (release-dir (and triple-dir
+                           (file-name-directory
+                            (directory-file-name triple-dir))))
+         (base-dir (and release-dir
+                        (file-name-directory
+                         (directory-file-name release-dir))))
+         (release-name (and release-dir
+                            (file-name-nondirectory
+                             (directory-file-name release-dir)))))
+    (when (and base-dir
+               (string= (file-name-as-directory (expand-file-name base-dir))
+                        (file-name-as-directory
+                         (expand-file-name nucleo-completion-module-directory))))
+      release-name)))
+
+(defun nucleo-completion--installed-module-stale-p (file)
+  "Return non-nil when installed module FILE is not for the configured release."
+  (let ((release (nucleo-completion--installed-module-release-name file)))
+    (and release
+         (not (string= release
+                       (nucleo-completion--module-release-directory-name))))))
+
+(defun nucleo-completion--loaded-installed-module-stale-p ()
+  "Return non-nil when the loaded installed module is for an older release."
+  (and nucleo-completion--loaded-module-file
+       (nucleo-completion--installed-module-stale-p
+        nucleo-completion--loaded-module-file)))
+
+(defun nucleo-completion--current-installed-module-file ()
+  "Return the current configured installed module file, or nil."
+  (let ((triple (nucleo-completion--module-install-triple)))
+    (when triple
+      (expand-file-name
+       (nucleo-completion--rust-library-name)
+       (nucleo-completion--module-install-directory triple)))))
+
+(defun nucleo-completion--maybe-warn-stale-loaded-module ()
+  "Warn once when an older installed dynamic module was loaded."
+  (when (and (not nucleo-completion--stale-module-warning-shown)
+             (nucleo-completion--loaded-installed-module-stale-p))
+    (setq nucleo-completion--stale-module-warning-shown t)
+    (display-warning
+     'nucleo-completion
+     (format
+      (concat
+       "Loaded module release %s, but this package expects module release %s. "
+       "Run M-x nucleo-completion-install-module and restart Emacs.")
+      (nucleo-completion--installed-module-release-name
+       nucleo-completion--loaded-module-file)
+      (nucleo-completion--module-release-directory-name))
+     :warning)))
 
 (defun nucleo-completion--dynamic-modules-supported-p ()
   "Return non-nil when this Emacs can load dynamic modules."
@@ -354,7 +456,8 @@ When CACHE is not a hash table, call PRODUCER without caching."
                       (nucleo-completion--prebuilt-module-directories)
                       (list nucleo-completion--directory
                             (expand-file-name "target/release" nucleo-completion--directory)
-                            (expand-file-name "target/debug" nucleo-completion--directory)))))))))
+                            (expand-file-name "target/debug" nucleo-completion--directory))
+                      (nucleo-completion--stale-installed-module-directories))))))))
 
 (defun nucleo-completion--highlight-limit ()
   "Return a sanitized value for eager or module highlight limits."
@@ -380,7 +483,9 @@ When CACHE is not a hash table, call PRODUCER without caching."
             (condition-case err
                 (progn
                   (module-load file)
-                  (setq loaded t)
+                  (setq loaded t
+                        nucleo-completion--loaded-module-file file)
+                  (nucleo-completion--maybe-warn-stale-loaded-module)
                   (throw 'loaded t))
               (error
                (push (cons file (error-message-string err))
@@ -414,10 +519,10 @@ When CACHE is not a hash table, call PRODUCER without caching."
   "Return the GitHub Release download base URL."
   (format "https://github.com/%s/releases/%s"
           nucleo-completion-module-release-repository
-          (if (and (stringp nucleo-completion-module-release-tag)
-                   (not (string-empty-p nucleo-completion-module-release-tag)))
-              (concat "download/" nucleo-completion-module-release-tag)
-            "latest/download")))
+          (if (nucleo-completion--module-latest-release-p)
+              "latest/download"
+            (concat "download/"
+                    (nucleo-completion--configured-module-release-tag)))))
 
 (defun nucleo-completion--module-asset-url (triple &optional checksum)
   "Return the GitHub Release URL for TRIPLE.
@@ -627,8 +732,9 @@ Honor IGNORE-CASE.  The result is an alist of (CANDIDATE . SCORE)."
 (defun nucleo-completion-install-module (&optional force no-confirm)
   "Download and install the Rust dynamic module for this platform.
 The module is downloaded from GitHub Releases only after
-confirmation, unless NO-CONFIRM is non-nil.  With prefix argument
-FORCE, replace an existing installed module."
+confirmation, unless NO-CONFIRM is non-nil.  The default release
+matches `nucleo-completion-required-module-version'.  With prefix
+argument FORCE, replace an existing installed module."
   (interactive "P")
   (unless (nucleo-completion--dynamic-modules-supported-p)
     (user-error "This Emacs was built without dynamic module support"))
@@ -691,10 +797,11 @@ FORCE, replace an existing installed module."
 ;;;###autoload
 (defun nucleo-completion-ensure-module (&optional force no-confirm)
   "Ensure the Rust dynamic module is installed and loaded.
-If the module API is already available, do nothing.  Otherwise,
-try loading a module from the normal search paths.  If that still
-does not make the module API available, download and install a
-prebuilt module for the current platform.
+If the module API is already available from the configured release,
+do nothing.  Otherwise, try loading a module from the normal
+search paths.  If that still does not make the module API
+available, or only an older installed release could be loaded,
+download and install a prebuilt module for the current platform.
 
 When called interactively, ask before downloading or replacing a
 module.  With prefix argument FORCE, replace an existing installed
@@ -704,15 +811,21 @@ confirmation for wrapper commands.
 
 Return non-nil when the module API is available after the attempt."
   (interactive "P")
-  (unless (nucleo-completion--module-ready-p)
-    (unless (nucleo-completion--dynamic-modules-supported-p)
-      (user-error "This Emacs was built without dynamic module support"))
-    (nucleo-completion--load-module)
+  (let ((interactive (called-interactively-p 'interactive)))
     (unless (nucleo-completion--module-ready-p)
-      (nucleo-completion-install-module
-       force
-       (or no-confirm
-           (not (called-interactively-p 'interactive))))))
+      (unless (nucleo-completion--dynamic-modules-supported-p)
+        (user-error "This Emacs was built without dynamic module support"))
+      (nucleo-completion--load-module))
+    (when (or (not (nucleo-completion--module-ready-p))
+              force
+              (nucleo-completion--loaded-installed-module-stale-p))
+      (let* ((destination (nucleo-completion--current-installed-module-file))
+             (skip-confirm (or no-confirm (not interactive)))
+             (replace-existing
+              (and skip-confirm destination (file-exists-p destination))))
+        (nucleo-completion-install-module
+         (or force replace-existing)
+         skip-confirm))))
   (nucleo-completion--module-ready-p))
 
 (defun nucleo-completion--maybe-prompt-module-install ()
