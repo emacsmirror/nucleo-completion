@@ -22,8 +22,11 @@
 (defvar nucleo-completion-tests-history nil
   "History variable used by nucleo-completion tests.")
 
-(defvar corfu-history nil)
-(defvar corfu-history-mode nil)
+(defvar corfu-history nil
+  "Mock Corfu history list used by nucleo-completion tests.")
+
+(defvar corfu-history-mode nil
+  "Mock Corfu history mode state used by nucleo-completion tests.")
 
 (defun nucleo-completion-tests--plain (strings)
   "Return STRINGS without text properties."
@@ -803,10 +806,11 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                      "fb" '("foobar" "fxxx" "foo-baz" "" "fb")))
                    '("fb" "foo-baz" "foobar")))))
 
-(ert-deftest nucleo-completion-fallback-filter-only-test ()
+(ert-deftest nucleo-completion-fallback-keeps-input-order-without-sort-test ()
   (let ((completion-ignore-case nil)
-        (nucleo-completion-sort-ties-by-length t)
-        (nucleo-completion-sort-ties-alphabetically t)
+        (nucleo-completion-sort-ties-by-history nil)
+        (nucleo-completion-sort-ties-by-length nil)
+        (nucleo-completion-sort-ties-alphabetically nil)
         (nucleo-completion-highlight-score-bands t)
         (nucleo-completion-max-highlighted-completions 10))
     (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
@@ -822,6 +826,74 @@ The stub returns TRIPLES wrapped as a module-result bundle."
           (let ((faces (ensure-list (get-text-property 0 'face candidate))))
             (should-not (memq 'nucleo-completion-high-score-face faces))
             (should-not (memq 'nucleo-completion-low-score-face faces))))))))
+
+(ert-deftest nucleo-completion-fallback-sort-ties-by-length-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-sort-ties-by-history nil)
+        (nucleo-completion-sort-ties-by-length t)
+        (nucleo-completion-sort-ties-alphabetically nil))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (error "Fallback must not call the Rust candidate API"))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "fb" '("foo-baz" "fb" "foobar" "bar")))
+                     '("fb" "foobar" "foo-baz"))))))
+
+(ert-deftest nucleo-completion-fallback-sort-ties-alphabetically-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-sort-ties-by-history nil)
+        (nucleo-completion-sort-ties-by-length nil)
+        (nucleo-completion-sort-ties-alphabetically t))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (error "Fallback must not call the Rust candidate API"))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "a" '("beta" "alpha" "aardvark")))
+                     '("aardvark" "alpha" "beta"))))))
+
+(ert-deftest nucleo-completion-fallback-sort-ties-history-before-length-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-sort-ties-by-history t)
+        (nucleo-completion-sort-ties-by-length t)
+        (nucleo-completion-sort-ties-alphabetically t)
+        (minibuffer-history-variable 'nucleo-completion-tests-history)
+        (nucleo-completion-tests-history '("alphabet" "alpha")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil))
+              ((symbol-function 'minibufferp)
+               (lambda (&optional _buffer) t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (error "Fallback must not call the Rust candidate API"))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "alp" '("alpaca" "alpha" "alphabet")))
+                     '("alphabet" "alpha" "alpaca"))))))
+
+(ert-deftest nucleo-completion-fallback-sort-ties-by-corfu-history-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-sort-ties-by-history t)
+        (nucleo-completion-sort-ties-by-length nil)
+        (nucleo-completion-sort-ties-alphabetically nil)
+        (corfu-history-mode t)
+        (corfu-history '("alpha" "beta")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil))
+              ((symbol-function 'minibufferp)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (error "Fallback must not call the Rust candidate API"))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "a" '("beta" "alpha" "aardvark")))
+                     '("alpha" "beta" "aardvark"))))))
 
 (ert-deftest nucleo-completion-native-module-smoke-test ()
   (unless (nucleo-completion--module-ready-p)

@@ -61,8 +61,8 @@ Or configure it with ~use-package~:
 #+end_src
 
 The package works without a Rust dynamic module by using a simple Emacs Lisp
-fallback matcher.  The fallback filters candidates but does not apply
-Rust-backed scoring or tie sorting.
+fallback matcher.  The fallback filters candidates and applies configured tie
+sorting across all fallback matches, but it does not apply Rust-backed scoring.
 
 To use a local checkout, add the package directory to ~load-path~:
 
@@ -74,9 +74,9 @@ To use a local checkout, add the package directory to ~load-path~:
 
 * Rust Dynamic Module
 
-The Rust module is optional.  It enables Nucleo scoring, tie sorting, and
-score-aware highlighting; without it, candidates are filtered by the Emacs Lisp
-fallback.
+The Rust module is optional.  It enables Nucleo scoring and score-aware
+highlighting; without it, candidates are filtered and tie-sorted by the Emacs
+Lisp fallback.
 
 The MELPA package does not include prebuilt binary modules.  To install a
 module for the current platform from GitHub Releases, run:
@@ -217,7 +217,9 @@ are not reordered.  History sorting affects minibuffer completion with an
 active history variable and ordinary buffer completion when ~corfu-history-mode~
 is enabled and ~corfu-history~ is available.
 
-Tie sorting requires the Rust module.
+When the Rust module is unavailable, the Emacs Lisp fallback treats every match
+as equal-scoring and applies the same history, length, and alphabetical
+tie-breakers to the filtered candidates.
 
 ** Score Band Highlighting
 

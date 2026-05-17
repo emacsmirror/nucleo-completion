@@ -112,27 +112,32 @@ and keeps that path for subsequent calls."
   "Non-nil after the module rejects a candidate as non-Unicode.")
 
 (defcustom nucleo-completion-sort-ties-by-history nil
-  "Whether to sort equal-scoring Nucleo matches by completion history.
+  "Whether to sort equal-scoring matches by completion history.
 When non-nil, candidates found earlier in the current history
 source come first.  Minibuffers use the active minibuffer history
 variable.  Ordinary buffers use `corfu-history' when
-`corfu-history-mode' is enabled.  This only affects candidates
-with the same Nucleo score."
+`corfu-history-mode' is enabled.  With the Rust module, this only
+affects candidates with the same Nucleo score.  In the Emacs Lisp
+fallback, all matches are treated as equal-scoring."
   :type 'boolean
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-sort-ties-by-length nil
-  "Whether to sort equal-scoring Nucleo matches by candidate length.
-When non-nil, shorter candidates come first.  This only affects
-candidates with the same Nucleo score."
+  "Whether to sort equal-scoring matches by candidate length.
+When non-nil, shorter candidates come first.  With the Rust
+module, this only affects candidates with the same Nucleo score.
+In the Emacs Lisp fallback, all matches are treated as
+equal-scoring."
   :type 'boolean
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-sort-ties-alphabetically nil
-  "Whether to sort equal-scoring Nucleo matches alphabetically.
+  "Whether to sort equal-scoring matches alphabetically.
 When `nucleo-completion-sort-ties-by-length' is also non-nil,
-alphabetical order is used after comparing length.  This only
-affects candidates with the same Nucleo score."
+alphabetical order is used after comparing length.  With the Rust
+module, this only affects candidates with the same Nucleo score.
+In the Emacs Lisp fallback, all matches are treated as
+equal-scoring."
   :type 'boolean
   :group 'nucleo-completion)
 
@@ -703,9 +708,77 @@ they can combine with expanded terms."
                    regexp-groups candidate)
              collect (cons candidate nil))))
 
-(defun nucleo-completion--fallback-filter (needle candidates)
-  "Filter CANDIDATES against NEEDLE without scoring or sorting."
-  (nucleo-completion--regexp-filter needle candidates))
+(defun nucleo-completion--fallback-alphabetical-key (candidate)
+  "Return CANDIDATE's alphabetical sort key for fallback sorting."
+  (let ((key (substring-no-properties candidate)))
+    (if completion-ignore-case
+        (downcase key)
+      key)))
+
+(defun nucleo-completion--fallback-sort-before-p
+    (item-a item-b rank-table)
+  "Return non-nil when ITEM-A should sort before ITEM-B.
+RANK-TABLE maps candidate strings to history ranks.  Items have
+the form [CANDIDATE POSITION LENGTH ALPHABETICAL-KEY]."
+  (let ((candidate-a (aref item-a 0))
+        (candidate-b (aref item-b 0))
+        (position-a (aref item-a 1))
+        (position-b (aref item-b 1))
+        (length-a (aref item-a 2))
+        (length-b (aref item-b 2))
+        (key-a (aref item-a 3))
+        (key-b (aref item-b 3)))
+    (cond
+     ((and rank-table
+           (nucleo-completion--history-rank-less-p
+            candidate-a candidate-b rank-table))
+      t)
+     ((and rank-table
+           (nucleo-completion--history-rank-less-p
+            candidate-b candidate-a rank-table))
+      nil)
+     ((and nucleo-completion-sort-ties-by-length
+           (/= length-a length-b))
+      (< length-a length-b))
+     ((and nucleo-completion-sort-ties-alphabetically
+           (not (string= key-a key-b)))
+      (string< key-a key-b))
+     (t
+      (< position-a position-b)))))
+
+(defun nucleo-completion--fallback-sort (candidates prefix)
+  "Sort fallback CANDIDATES as equal-score matches under PREFIX."
+  (let ((rank-table (nucleo-completion--history-rank-table prefix)))
+    (if (not (or rank-table
+                 nucleo-completion-sort-ties-by-length
+                 nucleo-completion-sort-ties-alphabetically))
+        candidates
+      (mapcar
+       (lambda (item) (aref item 0))
+       (sort
+        (cl-loop for candidate in candidates
+                 for position from 0
+                 collect
+                 (vector candidate
+                         position
+                         (and nucleo-completion-sort-ties-by-length
+                              (length candidate))
+                         (and nucleo-completion-sort-ties-alphabetically
+                              (nucleo-completion--fallback-alphabetical-key
+                               candidate))))
+        (lambda (item-a item-b)
+          (nucleo-completion--fallback-sort-before-p
+           item-a item-b rank-table)))))))
+
+(defun nucleo-completion--fallback-filter
+    (needle candidates &optional prefix)
+  "Filter CANDIDATES against NEEDLE and sort fallback ties.
+PREFIX is used to interpret minibuffer history entries.  The
+fallback does not compute scores, so every filtered candidate is
+treated as equal-scoring for tie sorting."
+  (nucleo-completion--fallback-sort
+   (nucleo-completion--regexp-filter needle candidates)
+   prefix))
 
 (defun nucleo-completion--module-filter (needle candidates ignore-case)
   "Filter and sort CANDIDATES against NEEDLE with the Rust module.
@@ -1473,7 +1546,7 @@ currently effective `completion-regexp-list'."
       table)))
 
 (defun nucleo-completion--minibuffer-history-rank-table (prefix)
-  "Return a hash table mapping minibuffer history candidates to ranks."
+  "Return a hash table mapping minibuffer history candidates under PREFIX."
   (when (nucleo-completion--active-history-variable-p)
     (let* ((history (symbol-value minibuffer-history-variable))
            (entries (if (listp history) history nil))
@@ -1568,7 +1641,8 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
     (nucleo-completion--module-completion-results
      prefix needle all expanded-regexp-p highlight-limit need-full-scores))
    (t
-    (list (nucleo-completion--fallback-filter needle all) nil nil nil))))
+    (list (nucleo-completion--fallback-filter needle all prefix)
+          nil nil nil))))
 
 (defun nucleo-completion--record-current-result (prefix needle all)
   "Record ALL as the current completion result for PREFIX and NEEDLE."
