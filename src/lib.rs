@@ -27,6 +27,7 @@ struct ScoredIndex {
 const PARALLEL_BATCH_SIZE: usize = 2048;
 const MIN_PARALLEL_ITEMS: usize = 8192;
 const MIN_PARALLEL_BYTES: usize = 3_000_000;
+const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy)]
 struct SortOptions {
@@ -406,9 +407,10 @@ fn build_list_3<'e>(env: &'e Env, a: Value<'e>, b: Value<'e>, c: Value<'e>) -> R
     env.cons(a, env.cons(b, env.cons(c, nil)?)?)
 }
 
-fn empty_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
+fn interrupted_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
-    build_list_3(env, nil, nil, nil)
+    let sentinel = env.intern("nucleo-completion-interrupted")?;
+    build_list_3(env, sentinel, nil, nil)
 }
 
 fn build_candidates_list<'e>(
@@ -542,7 +544,7 @@ fn candidates_impl<'e>(
     return_all_scores: Value<'e>,
 ) -> Result<Value<'e>> {
     if input_pending(env)? {
-        return empty_bundle(env);
+        return interrupted_bundle(env);
     }
 
     let (values, texts) = collect_candidates(candidates)?;
@@ -560,7 +562,7 @@ fn candidates_impl<'e>(
     let matches = score_items_with_sort(&pattern, &texts, sort_options, history_ranks.as_deref());
 
     if input_pending(env)? {
-        return empty_bundle(env);
+        return interrupted_bundle(env);
     }
 
     let highlight_limit = highlight_limit.into_rust::<usize>()?;
@@ -574,6 +576,11 @@ fn candidates_impl<'e>(
         highlight_limit,
         return_all_scores,
     )
+}
+
+#[defun]
+fn module_version<'e>(env: &'e Env) -> Result<Value<'e>> {
+    MODULE_VERSION.into_lisp(env)
 }
 
 #[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]

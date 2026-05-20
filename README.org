@@ -123,6 +123,12 @@ When a module from an older installed release is loaded as a fallback, a warning
 is shown once for the Emacs session so you can install the package-matched
 module and restart.
 
+The loaded module must report the same version as
+~nucleo-completion-required-module-version~.  If an older or otherwise
+incompatible module is already loaded, ~nucleo-completion~ warns once and uses
+the Emacs Lisp fallback until a matching module is installed and Emacs is
+restarted.
+
 Check whether the Rust module loaded with:
 
 #+begin_src emacs-lisp
@@ -253,6 +259,9 @@ Regexp expander results are cached for each completion pass, so user
 configuration normally does not need its own per-term cache.
 The default ~nucleo-completion-regexp-minimum-term-length~ is 2, so expanders do
 not run for one-character terms unless you lower that option.
+If an expander signals an error, it is ignored.  To diagnose expander failures,
+set ~nucleo-completion-report-regexp-function-errors~ to non-nil; each failing
+function is then reported once with ~display-warning~.
 
 Japanese Migemo example:
 

@@ -30,6 +30,8 @@
 (declare-function nucleo-completion-candidates "nucleo-completion-module")
 (declare-function nucleo-completion-candidates-with-history
                   "nucleo-completion-module")
+(declare-function nucleo-completion-module-version
+                  "nucleo-completion-module")
 (declare-function mm-destroy-parts "mm-decode")
 (declare-function mm-dissect-buffer "mm-decode")
 (declare-function mm-save-part-to-file "mm-decode")
@@ -64,6 +66,14 @@ The built-in fuzzy subsequence matcher is always used.  Regexps
 from this option are ORed with it for each term, while terms are
 ANDed together."
   :type '(repeat function)
+  :group 'nucleo-completion)
+
+(defcustom nucleo-completion-report-regexp-function-errors nil
+  "Whether to warn when a regexp expander signals an error.
+When nil, failing functions in `nucleo-completion-regexp-functions'
+are ignored.  When non-nil, each failing function is reported once
+with `display-warning' and then ignored for that call."
+  :type 'boolean
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-regexp-minimum-term-length 2
@@ -245,6 +255,12 @@ Each entry has the form (FILE . MESSAGE).")
 (defvar nucleo-completion--stale-module-warning-shown nil
   "Non-nil after warning about an older installed dynamic module.")
 
+(defvar nucleo-completion--module-version-warning-shown nil
+  "Non-nil after warning about an incompatible loaded dynamic module.")
+
+(defvar nucleo-completion--regexp-function-error-warnings nil
+  "Regexp expander functions already reported for signaling errors.")
+
 (defconst nucleo-completion--prebuilt-release-triples
   '("x86_64-unknown-linux-gnu"
     "x86_64-apple-darwin"
@@ -266,6 +282,10 @@ Each entry has the form (FILE . MESSAGE).")
 
 (defconst nucleo-completion--score-property 'nucleo-completion-score
   "Text property used to carry Rust scores on returned candidates.")
+
+(defconst nucleo-completion--interrupted-sentinel
+  'nucleo-completion-interrupted
+  "Marker used by the Rust module when scoring was interrupted.")
 
 (defconst nucleo-completion--scrub-map-pairs-key
   'nucleo-completion--scrub-map-pairs
@@ -424,6 +444,39 @@ Return nil when FILE is not under `nucleo-completion-module-directory'."
        (nucleo-completion--installed-module-stale-p
         nucleo-completion--loaded-module-file)))
 
+(defun nucleo-completion--loaded-module-version ()
+  "Return the loaded Rust module version string, or nil."
+  (when (fboundp 'nucleo-completion-module-version)
+    (let ((version (ignore-errors (nucleo-completion-module-version))))
+      (and (stringp version) version))))
+
+(defun nucleo-completion--loaded-module-version-compatible-p ()
+  "Return non-nil when the loaded Rust module version is compatible.
+Test doubles that define the candidate API without loading the
+dynamic module are accepted so unit tests can exercise the module
+call path without a built binary."
+  (and (fboundp 'nucleo-completion-candidates)
+       (let ((version (nucleo-completion--loaded-module-version)))
+         (if version
+             (string= version nucleo-completion-required-module-version)
+           (not (featurep 'nucleo-completion-module))))))
+
+(defun nucleo-completion--maybe-warn-incompatible-loaded-module ()
+  "Warn once when the loaded Rust module version is incompatible."
+  (when (and (not nucleo-completion--module-version-warning-shown)
+             (fboundp 'nucleo-completion-candidates)
+             (not (nucleo-completion--loaded-module-version-compatible-p)))
+    (setq nucleo-completion--module-version-warning-shown t)
+    (display-warning
+     'nucleo-completion
+     (format
+      (concat
+       "Loaded Rust module version %s, but this package expects %s. "
+       "Install the matching module and restart Emacs.")
+      (or (nucleo-completion--loaded-module-version) "unknown")
+      nucleo-completion-required-module-version)
+     :warning)))
+
 (defun nucleo-completion--current-installed-module-file ()
   "Return the current configured installed module file, or nil."
   (let ((triple (nucleo-completion--module-install-triple)))
@@ -499,6 +552,7 @@ Return nil when FILE is not under `nucleo-completion-module-directory'."
                   (setq loaded t
                         nucleo-completion--loaded-module-file file)
                   (nucleo-completion--maybe-warn-stale-loaded-module)
+                  (nucleo-completion--maybe-warn-incompatible-loaded-module)
                   (throw 'loaded t))
               (error
                (push (cons file (error-message-string err))
@@ -631,6 +685,29 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
              t)
          (invalid-regexp nil))))
 
+(defun nucleo-completion--maybe-warn-regexp-function-error
+    (function term error-message)
+  "Warn once that FUNCTION failed for TERM with ERROR-MESSAGE."
+  (when (and nucleo-completion-report-regexp-function-errors
+             (not (memq function
+                        nucleo-completion--regexp-function-error-warnings)))
+    (push function nucleo-completion--regexp-function-error-warnings)
+    (display-warning
+     'nucleo-completion
+     (format "Regexp expander %S failed for term %S: %s"
+             function term error-message)
+     :warning)))
+
+(defun nucleo-completion--regexp-function-value (function term)
+  "Return FUNCTION's regexp expansion for TERM, or nil on error."
+  (when (functionp function)
+    (condition-case err
+        (funcall function term)
+      (error
+       (nucleo-completion--maybe-warn-regexp-function-error
+        function term (error-message-string err))
+       nil))))
+
 (defun nucleo-completion--regexp-function-regexps (term)
   "Return extra regexps produced for TERM."
   (nucleo-completion--cached
@@ -642,8 +719,8 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
   "Return uncached extra regexps produced for TERM."
   (when (>= (length term) (nucleo-completion--regexp-minimum-term-length))
     (cl-loop for function in nucleo-completion-regexp-functions
-             for value = (when (functionp function)
-                           (ignore-errors (funcall function term)))
+             for value = (nucleo-completion--regexp-function-value
+                          function term)
              append (cond
                      ((nucleo-completion--valid-regexp-p value)
                       (list value))
@@ -802,12 +879,14 @@ Honor IGNORE-CASE.  The result is an alist of (CANDIDATE . SCORE)."
       (cl-mapcar #'cons cands scores))))
 
 (defun nucleo-completion--module-ready-p ()
-  "Return non-nil when the current Rust module provides the batch API."
-  (fboundp 'nucleo-completion-candidates))
+  "Return non-nil when the current Rust module provides a compatible API."
+  (prog1 (nucleo-completion--loaded-module-version-compatible-p)
+    (nucleo-completion--maybe-warn-incompatible-loaded-module)))
 
 (defun nucleo-completion--module-supports-history-p ()
   "Return non-nil when the Rust module supports history tie sorting."
-  (fboundp 'nucleo-completion-candidates-with-history))
+  (and (nucleo-completion--module-ready-p)
+       (fboundp 'nucleo-completion-candidates-with-history)))
 
 ;;;###autoload
 (defun nucleo-completion-install-module (&optional force no-confirm)
@@ -1132,6 +1211,11 @@ scrubbed copy was passed to the module."
 (defun nucleo-completion--bundle-candidates (bundle)
   "Return the candidate list from BUNDLE."
   (nth 0 bundle))
+
+(defun nucleo-completion--bundle-interrupted-p (bundle)
+  "Return non-nil when BUNDLE indicates an interrupted module call."
+  (eq (nucleo-completion--bundle-candidates bundle)
+      nucleo-completion--interrupted-sentinel))
 
 (defun nucleo-completion--bundle-top-info (bundle)
   "Return the top-info list from BUNDLE."
@@ -1613,6 +1697,8 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
                   (and module-history-p history-ranks)))
          top-info
          full-scores)
+    (when (nucleo-completion--bundle-interrupted-p bundle)
+      (throw 'nucleo-completion-interrupted t))
     (when (and history-rank-table (not module-history-p))
       (setq bundle
             (nucleo-completion--sort-bundle-ties-by-history
@@ -1934,7 +2020,9 @@ PRED and POINT follow `completion-all-completions' semantics.
 Wrap filtering with `while-no-input' so interactive typing can
 interrupt expensive scoring."
   (pcase (while-no-input
-           (nucleo-completion--all-completions-1 string table pred point))
+           (catch 'nucleo-completion-interrupted
+             (nucleo-completion--all-completions-1
+              string table pred point)))
     ('nil nil)
     ('t
      (when (consp nucleo-completion--current-result)

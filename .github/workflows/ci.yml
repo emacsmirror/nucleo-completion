@@ -1,0 +1,35 @@
+name: ci
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Emacs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox
+
+      - name: Build Rust module
+        run: cargo build --release
+
+      - name: Test Rust module
+        run: cargo test --release
+
+      - name: Byte compile Elisp
+        run: emacs -Q --batch -L . -L target/release --eval '(byte-compile-file "nucleo-completion.el")'
+
+      - name: Run ERT
+        run: emacs -Q --batch -L . -L target/release -L test -l test/nucleo-completion-tests.el -f ert-run-tests-batch-and-exit

@@ -499,6 +499,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
          (nucleo-completion-required-module-version "9.8.7")
          (nucleo-completion--loaded-module-file nil)
          (nucleo-completion--stale-module-warning-shown nil)
+         (nucleo-completion--module-version-warning-shown nil)
          (old-file
           (expand-file-name
            "v9.8.6/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
@@ -519,19 +520,25 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                      (lambda () (list old-file)))
                     ((symbol-function 'module-load)
                      (lambda (_file) t))
+                    ((symbol-function 'nucleo-completion-module-version)
+                     (lambda () "9.8.7"))
                     ((symbol-function 'display-warning)
                      (lambda (type message &optional level buffer-name)
                        (push (list type message level buffer-name) warnings))))
             (nucleo-completion--load-module)
             (should (equal nucleo-completion--loaded-module-file old-file))
-            (should (string-match-p "expects module release v9.8.7"
-                                    (cadar warnings)))))
+            (should (cl-some
+                     (lambda (warning)
+                       (string-match-p "expects module release v9.8.7"
+                                       (cadr warning)))
+                     warnings))))
       (delete-directory root t))))
 
 (ert-deftest nucleo-completion-custom-group-test ()
   (let ((members (get 'nucleo-completion 'custom-group)))
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
+                      nucleo-completion-report-regexp-function-errors
                       nucleo-completion-regexp-minimum-term-length
                       nucleo-completion-regexp-only-match-priority
                       nucleo-completion-scrub-non-unicode-candidates
@@ -877,7 +884,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
                (lambda () nil))
               ((symbol-function 'minibufferp)
-               (lambda (&optional _buffer) t))
+               (lambda (&rest _) t))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (&rest _)
                  (error "Fallback must not call the Rust candidate API"))))
@@ -926,6 +933,12 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                     (copy-sequence candidate))
                    score))))
 
+(ert-deftest nucleo-completion-native-module-version-test ()
+  (unless (nucleo-completion--module-ready-p)
+    (ert-skip "Rust module is not available"))
+  (should (equal (nucleo-completion-module-version)
+                 nucleo-completion-required-module-version)))
+
 (ert-deftest nucleo-completion-native-module-history-sort-test ()
   (unless (nucleo-completion--module-supports-history-p)
     (ert-skip "Rust module with history sorting is not available"))
@@ -942,6 +955,33 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (should-error
      (nucleo-completion--call-module "fb" '("fb") nil 0 nil)
      :type 'wrong-number-of-arguments)))
+
+(ert-deftest nucleo-completion-module-ready-checks-version-test ()
+  (let ((nucleo-completion-required-module-version "9.8.7")
+        (nucleo-completion--module-version-warning-shown nil)
+        warnings)
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nucleo-completion-module-version)
+               (lambda () "9.8.6"))
+              ((symbol-function 'display-warning)
+               (lambda (type message &optional level buffer-name)
+                 (push (list type message level buffer-name) warnings))))
+      (should-not (nucleo-completion--module-ready-p))
+      (should (= (length warnings) 1))
+      (should (string-match-p "expects 9.8.7" (cadar warnings)))
+      (should-not (nucleo-completion--module-ready-p))
+      (should (= (length warnings) 1))))
+  (let ((nucleo-completion-required-module-version "9.8.7")
+        (nucleo-completion--module-version-warning-shown nil))
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _) nil))
+              ((symbol-function 'nucleo-completion-module-version)
+               (lambda () "9.8.7"))
+              ((symbol-function 'display-warning)
+               (lambda (&rest _)
+                 (error "Compatible module must not warn"))))
+      (should (nucleo-completion--module-ready-p)))))
 
 (ert-deftest nucleo-completion-module-path-sanitizes-highlight-limit-test ()
   (let ((completion-ignore-case nil)
@@ -996,6 +1036,20 @@ The stub returns TRIPLES wrapped as a module-result bundle."
          (nucleo-completion--all-completions-1
           "fb" '("fb" "bar" "foo-baz" "unmatched") nil nil)
          nil))
+      (should (equal nucleo-completion--current-result '("fb"))))))
+
+(ert-deftest nucleo-completion-module-interrupt-reuses-last-result-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion--current-prefix "")
+        (nucleo-completion--current-result '("fb")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should (equal (nucleo-completion-all-completions
+                      "fo" '("foo" "bar" "fob") nil nil)
+                     '("fb")))
       (should (equal nucleo-completion--current-result '("fb"))))))
 
 (ert-deftest nucleo-completion-case-sensitivity-test ()
@@ -1154,6 +1208,30 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                     (nucleo-completion-all-completions
                      "jp lang" '("日本語" "日本史" "英語" "jp-lang")))
                    '("日本語" "jp-lang")))))
+
+(ert-deftest nucleo-completion-regexp-function-error-warning-test ()
+  (let ((expander (lambda (_term)
+                    (error "Regexp backend failed"))))
+    (let ((nucleo-completion-regexp-functions (list expander))
+          (nucleo-completion-report-regexp-function-errors nil)
+          (nucleo-completion--regexp-function-error-warnings nil))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (&rest _)
+                   (error "Regexp warning should be disabled"))))
+        (should-not (nucleo-completion--regexp-function-regexps "fail"))))
+    (let ((nucleo-completion-regexp-functions (list expander))
+          (nucleo-completion-report-regexp-function-errors t)
+          (nucleo-completion--regexp-function-error-warnings nil)
+          warnings)
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (type message &optional level buffer-name)
+                   (push (list type message level buffer-name) warnings))))
+        (should-not (nucleo-completion--regexp-function-regexps "fail"))
+        (should-not (nucleo-completion--regexp-function-regexps "again"))
+        (should (= (length warnings) 1))
+        (should (eq (caar warnings) 'nucleo-completion))
+        (should (string-match-p "Regexp backend failed"
+                                (cadar warnings)))))))
 
 (ert-deftest nucleo-completion-regexp-functions-skip-short-terms-test ()
   (let ((nucleo-completion-tests--regexp-calls 0)
@@ -1382,7 +1460,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (nucleo-completion-tests-history
          '("/tmp/alpha" "/var/beta" "/tmp/gamma")))
     (cl-letf (((symbol-function 'minibufferp)
-               (lambda (&optional _buffer) t)))
+               (lambda (&rest _) t)))
       (should (equal (car (nucleo-completion--history-ranking
                            "/tmp/" '("beta" "gamma" "alpha")))
                      '(nil 1 0))))))
@@ -1392,7 +1470,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (minibuffer-history-variable 'nucleo-completion-tests-history)
         (nucleo-completion-tests-history '("alpha")))
     (cl-letf (((symbol-function 'minibufferp)
-               (lambda (&optional _buffer) nil)))
+               (lambda (&rest _) nil)))
       (should-not (nucleo-completion--history-ranking
                    "" '("alpha"))))))
 
@@ -1417,7 +1495,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
                (lambda () t))
               ((symbol-function 'minibufferp)
-               (lambda (&optional _buffer) t))
+               (lambda (&rest _) t))
               ((symbol-function 'nucleo-completion-candidates-with-history)
                (lambda (needle candidates ignore-case by-length alphabetically
                                history-ranks limit &optional return-all-scores)
@@ -1474,7 +1552,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
                (lambda () nil))
               ((symbol-function 'minibufferp)
-               (lambda (&optional _buffer) t))
+               (lambda (&rest _) t))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (needle candidates ignore-case by-length alphabetically
                                limit &optional return-all-scores)
