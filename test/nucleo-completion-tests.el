@@ -121,15 +121,25 @@ The stub returns TRIPLES wrapped as a module-result bundle."
          (system-type 'gnu/linux)
          (system-configuration "x86_64-pc-linux-gnu")
          (candidates (nucleo-completion--module-candidates)))
-    (should (member "/tmp/nucleo-modules/v9.8.7/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+    (should (member (expand-file-name
+                     "v9.8.7/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+                     nucleo-completion-module-directory)
                     candidates))
-    (should (member "/tmp/nucleo-completion/bin/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+    (should (member (expand-file-name
+                     "bin/x86_64-unknown-linux-gnu/libnucleo_completion_module.so"
+                     nucleo-completion--directory)
                     candidates))
-    (should (member "/tmp/nucleo-completion/bin/x86_64-unknown-linux-musl/libnucleo_completion_module.so"
+    (should (member (expand-file-name
+                     "bin/x86_64-unknown-linux-musl/libnucleo_completion_module.so"
+                     nucleo-completion--directory)
                     candidates))
-    (should (member "/tmp/nucleo-completion/target/release/libnucleo_completion_module.so"
+    (should (member (expand-file-name
+                     "target/release/libnucleo_completion_module.so"
+                     nucleo-completion--directory)
                     candidates))
-    (should (member "/tmp/nucleo-completion/target/debug/libnucleo_completion_module.so"
+    (should (member (expand-file-name
+                     "target/debug/libnucleo_completion_module.so"
+                     nucleo-completion--directory)
                     candidates))))
 
 (ert-deftest nucleo-completion-module-install-triple-test ()
@@ -342,7 +352,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 
 (ert-deftest nucleo-completion-ensure-module-loads-installed-module-test ()
   (let (install-called load-called
-        (ready nil))
+                       (ready nil))
     (cl-letf (((symbol-function 'nucleo-completion--dynamic-modules-supported-p)
                (lambda () t))
               ((symbol-function 'nucleo-completion--module-ready-p)
@@ -730,7 +740,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                      '("foo" "bar"))))))
 
 (ert-deftest nucleo-completion-module-results-retries-non-unicode-scrub-test ()
-  "Module Unicode encoder failures enable scrub retry automatically."
+  "Module Unicode encoder failures enable scrub retry for that call."
   (let* ((tofu (string #x200006))
          (consult-cand (concat "\"日本太郎\" <taro@example.invalid>" tofu))
          (nucleo-completion-scrub-non-unicode-candidates nil)
@@ -755,7 +765,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (should (equal (nreverse received-inputs)
                        (list (list consult-cand)
                              '("\"日本太郎\" <taro@example.invalid>"))))
-        (should nucleo-completion--force-scrub-non-unicode-candidates)
+        (should-not nucleo-completion--force-scrub-non-unicode-candidates)
         (should (eq (car returned) consult-cand))))))
 
 (ert-deftest nucleo-completion-module-results-keeps-propertized-candidates-test ()

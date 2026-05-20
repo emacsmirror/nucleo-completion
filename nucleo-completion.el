@@ -103,13 +103,17 @@ and restores the original strings on return.
 Keep this nil when candidates are ordinary Unicode strings.  It
 avoids an extra Emacs Lisp scan over every candidate before each
 module call.  If a module call later fails with a
-`unicode-string-p' error, Nucleo retries with scrubbing enabled
-and keeps that path for subsequent calls."
+`unicode-string-p' error, Nucleo retries that call once with
+scrubbing enabled.  Set this option explicitly when a frontend
+regularly returns non-Unicode candidates."
   :type 'boolean
   :group 'nucleo-completion)
 
 (defvar nucleo-completion--force-scrub-non-unicode-candidates nil
-  "Non-nil after the module rejects a candidate as non-Unicode.")
+  "Non-nil to force non-Unicode scrubbing for module calls.
+This internal flag is not set automatically after retryable module
+errors; use `nucleo-completion-scrub-non-unicode-candidates' for
+persistent opt-in scrubbing.")
 
 (defcustom nucleo-completion-sort-ties-by-history nil
   "Whether to sort equal-scoring matches by completion history.
@@ -1105,8 +1109,8 @@ cannot encode as UTF-8.  Such candidates are scrubbed of those
 characters before being passed to the module when
 `nucleo-completion-scrub-non-unicode-candidates' is non-nil.  When
 this option is nil and the module rejects a candidate as
-non-Unicode, this function retries once with scrubbing enabled and
-uses that path for subsequent calls.
+non-Unicode, this function retries that call once with scrubbing
+enabled.
 Original candidate strings are restored on the way back so text
 properties (Consult metadata, invisibility, faces) survive when a
 scrubbed copy was passed to the module."
@@ -1120,11 +1124,9 @@ scrubbed copy was passed to the module."
       (wrong-type-argument
        (if (and (not scrub-non-unicode)
                 (nucleo-completion--module-unicode-error-p err))
-           (progn
-             (setq nucleo-completion--force-scrub-non-unicode-candidates t)
-             (nucleo-completion--module-results-with-scrub
-              needle candidates ignore-case highlight-limit return-all-scores
-              t history-ranks))
+           (nucleo-completion--module-results-with-scrub
+            needle candidates ignore-case highlight-limit return-all-scores
+            t history-ranks)
          (signal (car err) (cdr err)))))))
 
 (defun nucleo-completion--bundle-candidates (bundle)

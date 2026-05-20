@@ -247,6 +247,10 @@ completion list を再構築する。worker thread は固定 size の batch を 
 経由で取得するため、候補文字列の長さや scoring cost が偏っても worker 間の負荷が
 偏りにくい。
 
+並列 scoring は thread spawn と結果集約の overhead があるため、候補数と候補文字列の
+総 byte 数の両方が十分大きい場合だけ使う。短い候補では数千件規模でも serial 経路の方が
+速いことがあるため、候補数だけでは並列化を判断しない。
+
 ~nucleo-matcher~ の ~Matcher~ は scratch memory を持つため、single-thread 経路では
 thread-local に再利用し、parallel worker では worker ごとに作成する。
 
@@ -281,14 +285,72 @@ test double が score property を返さない場合は、Elisp 側で候補へ 
 候補を渡す前の non-Unicode codepoint 走査は行わない。通常の completion table は
 Unicode 文字列だけを含むため、この既定値により Emacs Lisp 側で候補全文をもう一度
 走査するコストを避ける。module が ~unicode-string-p~ error で候補を拒否した場合は、
-一度だけ non-Unicode scrub を有効にして retry し、以後の module call でも scrub 経路を
-使う。Consult などの frontend が Unicode 上限を超える disambiguation 文字を候補へ
+その module call だけ一度 non-Unicode scrub を有効にして retry する。scrub は候補全文の
+走査を伴い、大きい候補集合では数十 ms 以上になり得るため、retry 成功後に全 completion
+へ自動的に sticky 適用しない。Consult などの frontend が Unicode 上限を超える disambiguation 文字を候補へ
 付与することが分かっている環境では、この option を non-nil にすることで初回から
 scrubbed copy を module に渡し、戻り値では元の candidate object を復元する。
 
 score-band highlight が有効な場合、high-score 判定で使う単語完全一致 regexp も
 completion pass ごとに cache する。同じ needle の上位候補を複数 highlight しても、
 term ごとの regexp 文字列を候補ごとに組み立て直さない。
+
+** Performance Evidence
+
+2026-05-20 に Windows / GNU Emacs 30.2 / rustc 1.95.0
+~stable-x86_64-pc-windows-gnu~ で測定した。
+
+Rust module の serial/parallel scoring gate は次の command で再測定できる。
+
+#+begin_src sh
+  cargo +stable-x86_64-pc-windows-gnu test --release \
+    benchmark_parallel_scoring_gate_evidence -- --ignored --nocapture
+#+end_src
+
+同日の測定結果:
+
+| case   |  items |    bytes | workers | serial   | parallel | gate  |
+|--------+--------+----------+---------+----------+----------+-------|
+| short  |  16384 |   753664 |       8 | 398.4us  | 588.6us  | false |
+| medium |   8192 |  4177920 |       4 | 553.5us  | 501.2us  | true  |
+| large  | 262144 | 37386592 |       8 | 10.346ms | 7.130ms  | true  |
+
+この結果に基づき、candidate 数だけで parallel scoring を使う最適化は採用しない。
+~MIN_PARALLEL_ITEMS~ と ~MIN_PARALLEL_BYTES~ の両方を満たす場合だけ parallel scoring
+を使う。短い候補集合では parallel overhead が上回ることを上表の short case の
+エビデンスとして残す。4MB 程度の medium case は差が小さいものの、parallel 経路が
+serial 経路を下回ったため、~MIN_PARALLEL_BYTES~ は 3MB にする。
+
+2026-05-20 に Linux / GNU Emacs 30.2 の ~emacs-completion-bench~ でも確認した。
+同 benchmark の candidate set は 95,653 items / 約 3.59MB / 平均 37.58 bytes で、
+~MIN_PARALLEL_BYTES~ が 6MB の場合は serial 経路になり ~nucleo . default~ が
+約 1.002s だった。3MB に下げると parallel 経路になり、同じ条件で約 0.868s まで
+戻った。
+
+non-Unicode scrub の sticky retry は採用しない。次の batch command で、clean な
+50,000 candidates / 120 chars を 20 回処理した。
+
+#+begin_src sh
+  emacs -Q --batch -L . -L target/release --eval \
+    '(progn
+       (require (quote benchmark))
+       (require (quote nucleo-completion))
+       (let* ((base (make-string 120 ?x))
+              (candidates (make-list 50000 base))
+              (nucleo-completion-scrub-non-unicode-candidates nil)
+              (nucleo-completion--force-scrub-non-unicode-candidates nil))
+         (princ (format "scrub-disabled=%S\n"
+                        (benchmark-run 20
+                          (nucleo-completion--scrub-candidates candidates nil))))
+         (princ (format "scrub-enabled=%S\n"
+                        (benchmark-run 20
+                          (nucleo-completion--scrub-candidates candidates t))))))'
+#+end_src
+
+結果は ~scrub-disabled=(0.047267 0 0.0)~、
+~scrub-enabled=(2.777861 4 0.027629)~ だった。scrub は clean candidates でも
+full scan を伴うため、module が ~unicode-string-p~ error を返した call だけ retry
+し、以後の completion に自動で sticky 適用しない。
 
 Rust module が使える場合、regexp expander が有効でも先に Rust module で fuzzy
 filtering/scoring を行う。module が fuzzy match として返した候補には Emacs Lisp

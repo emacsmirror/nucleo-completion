@@ -25,6 +25,8 @@ struct ScoredIndex {
 }
 
 const PARALLEL_BATCH_SIZE: usize = 2048;
+const MIN_PARALLEL_ITEMS: usize = 8192;
+const MIN_PARALLEL_BYTES: usize = 3_000_000;
 
 #[derive(Clone, Copy)]
 struct SortOptions {
@@ -130,25 +132,15 @@ fn score_items_with_sort(
     sort_options: SortOptions,
     history_ranks: Option<&[Option<usize>]>,
 ) -> Vec<ScoredIndex> {
-    if texts.len() < PARALLEL_BATCH_SIZE {
-        return sort_scored(
-            score_items_serial(pattern, texts),
-            texts,
-            sort_options,
-            history_ranks,
-        );
+    if !should_score_parallel_workload(texts) {
+        return score_items_serial_with_sort(pattern, texts, sort_options, history_ranks);
     }
 
     let pool = matcher_pool();
     let workers = parallel_worker_count(texts.len(), pool.len());
 
     if workers == 1 {
-        return sort_scored(
-            score_items_serial(pattern, texts),
-            texts,
-            sort_options,
-            history_ranks,
-        );
+        return score_items_serial_with_sort(pattern, texts, sort_options, history_ranks);
     }
 
     sort_scored(
@@ -157,6 +149,30 @@ fn score_items_with_sort(
         sort_options,
         history_ranks,
     )
+}
+
+fn score_items_serial_with_sort(
+    pattern: &Pattern,
+    texts: &[String],
+    sort_options: SortOptions,
+    history_ranks: Option<&[Option<usize>]>,
+) -> Vec<ScoredIndex> {
+    sort_scored(
+        score_items_serial(pattern, texts),
+        texts,
+        sort_options,
+        history_ranks,
+    )
+}
+
+#[cfg(test)]
+fn should_score_parallel(texts: &[String], workers: usize) -> bool {
+    workers > 1 && should_score_parallel_workload(texts)
+}
+
+fn should_score_parallel_workload(texts: &[String]) -> bool {
+    texts.len() >= MIN_PARALLEL_ITEMS
+        && texts.iter().map(|text| text.len()).sum::<usize>() >= MIN_PARALLEL_BYTES
 }
 
 fn score_items_serial(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
@@ -614,6 +630,7 @@ fn candidates_with_history<'e>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn parallel_worker_count_caps_to_batches() {
@@ -626,6 +643,130 @@ mod tests {
     fn parallel_worker_count_caps_to_available_parallelism() {
         assert_eq!(parallel_worker_count(PARALLEL_BATCH_SIZE * 8, 2), 2);
         assert_eq!(parallel_worker_count(PARALLEL_BATCH_SIZE * 8, 0), 1);
+    }
+
+    #[test]
+    fn should_score_parallel_requires_multiple_workers() {
+        let texts = vec!["x".repeat(768); MIN_PARALLEL_ITEMS];
+        assert!(!should_score_parallel(&texts, 1));
+        assert!(should_score_parallel(&texts, 2));
+    }
+
+    #[test]
+    fn should_score_parallel_keeps_small_candidate_sets_serial() {
+        let texts = vec!["x".repeat(2000); MIN_PARALLEL_ITEMS - 1];
+        assert!(!should_score_parallel(&texts, 8));
+    }
+
+    #[test]
+    fn should_score_parallel_keeps_short_candidate_sets_serial() {
+        let texts = vec!["x".repeat(48); MIN_PARALLEL_ITEMS * 2];
+        assert!(!should_score_parallel(&texts, 8));
+    }
+
+    #[test]
+    fn should_score_parallel_accepts_large_or_long_candidate_sets() {
+        let texts = vec!["x".repeat(768); MIN_PARALLEL_ITEMS];
+        assert!(should_score_parallel(&texts, 8));
+
+        let many_short = vec!["x".repeat(48); MIN_PARALLEL_ITEMS * 16];
+        assert!(should_score_parallel(&many_short, 8));
+    }
+
+    fn median_duration(mut durations: Vec<Duration>) -> Duration {
+        durations.sort_unstable();
+        durations[durations.len() / 2]
+    }
+
+    fn measure_duration(mut run: impl FnMut()) -> Duration {
+        let mut durations = Vec::new();
+        for _ in 0..15 {
+            let start = Instant::now();
+            run();
+            durations.push(start.elapsed());
+        }
+        median_duration(durations)
+    }
+
+    #[test]
+    #[ignore = "records local timing evidence for the serial/parallel scoring gate"]
+    fn benchmark_parallel_scoring_gate_evidence() {
+        let pattern = Pattern::parse("abc", CaseMatching::Ignore, Normalization::Smart);
+        let short_texts = (0..(MIN_PARALLEL_ITEMS * 2))
+            .map(|index| format!("abc-{:05}-{}", index, "x".repeat(36)))
+            .collect::<Vec<_>>();
+        let medium_texts = (0..MIN_PARALLEL_ITEMS)
+            .map(|index| format!("abc-{:05}-{}", index, "x".repeat(500)))
+            .collect::<Vec<_>>();
+        let large_texts = (0..(MIN_PARALLEL_ITEMS * 32))
+            .map(|index| format!("abc-{:05}-{}", index, "x".repeat(132)))
+            .collect::<Vec<_>>();
+        let pool = matcher_pool();
+        let short_workers = parallel_worker_count(short_texts.len(), pool.len());
+        let medium_workers = parallel_worker_count(medium_texts.len(), pool.len());
+        let large_workers = parallel_worker_count(large_texts.len(), pool.len());
+
+        let short_serial = measure_duration(|| {
+            std::hint::black_box(score_items_serial(&pattern, &short_texts));
+        });
+        let short_parallel = measure_duration(|| {
+            std::hint::black_box(score_items_parallel(
+                &pattern,
+                &short_texts,
+                pool,
+                short_workers,
+            ));
+        });
+        let medium_serial = measure_duration(|| {
+            std::hint::black_box(score_items_serial(&pattern, &medium_texts));
+        });
+        let medium_parallel = measure_duration(|| {
+            std::hint::black_box(score_items_parallel(
+                &pattern,
+                &medium_texts,
+                pool,
+                medium_workers,
+            ));
+        });
+        let large_serial = measure_duration(|| {
+            std::hint::black_box(score_items_serial(&pattern, &large_texts));
+        });
+        let large_parallel = measure_duration(|| {
+            std::hint::black_box(score_items_parallel(
+                &pattern,
+                &large_texts,
+                pool,
+                large_workers,
+            ));
+        });
+
+        eprintln!(
+            "short candidates: items={} bytes={} workers={} serial={:?} parallel={:?} gate={}",
+            short_texts.len(),
+            short_texts.iter().map(|text| text.len()).sum::<usize>(),
+            short_workers,
+            short_serial,
+            short_parallel,
+            should_score_parallel(&short_texts, short_workers)
+        );
+        eprintln!(
+            "medium candidates: items={} bytes={} workers={} serial={:?} parallel={:?} gate={}",
+            medium_texts.len(),
+            medium_texts.iter().map(|text| text.len()).sum::<usize>(),
+            medium_workers,
+            medium_serial,
+            medium_parallel,
+            should_score_parallel(&medium_texts, medium_workers)
+        );
+        eprintln!(
+            "large candidates: items={} bytes={} workers={} serial={:?} parallel={:?} gate={}",
+            large_texts.len(),
+            large_texts.iter().map(|text| text.len()).sum::<usize>(),
+            large_workers,
+            large_serial,
+            large_parallel,
+            should_score_parallel(&large_texts, large_workers)
+        );
     }
 
     #[test]
