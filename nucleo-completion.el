@@ -45,7 +45,8 @@
 (declare-function url-retrieve-synchronously "url")
 (defvar mm-attachment-file-modes)
 (defvar completion-flex-nospace)
-(defvar completion-lazy-hilit)
+(defvar completion-lazy-hilit nil
+  "Non-nil when completion UIs request lazy candidate highlighting.")
 (defvar completion-lazy-hilit-fn)
 (defvar completion-regexp-list)
 (defvar corfu-history)

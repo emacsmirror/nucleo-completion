@@ -579,6 +579,9 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                       nucleo-completion-module-install-policy))
       (should (member (list symbol 'custom-variable) members)))))
 
+(ert-deftest nucleo-completion-lazy-highlight-variable-is-special-test ()
+  (should (special-variable-p 'completion-lazy-hilit)))
+
 (ert-deftest nucleo-completion-removed-optimization-options-test ()
   (dolist (symbol '(nucleo-completion-persistent-regexp-cache-size
                     nucleo-completion-long-candidate-threshold
