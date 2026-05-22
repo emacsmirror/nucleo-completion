@@ -230,18 +230,15 @@ fn scored_lisp_candidate_with_ties<'e>(
 ) -> Option<ScoredCandidateWithTies<'e>> {
     pattern
         .score(Utf32Str::new(text, utf32_buf), matcher)
-        .map(|score| {
-            ScoredCandidateWithTies {
-                value,
-                sort_data: CandidateSortData {
-                    index,
-                    score,
-                    history_rank: history_ranks
-                        .and_then(|ranks| ranks.get(index).copied().flatten()),
-                    length: sort_options.ties_by_length.then(|| text.chars().count()),
-                    alphabetical_key: candidate_alphabetical_key(text, sort_options),
-                },
-            }
+        .map(|score| ScoredCandidateWithTies {
+            value,
+            sort_data: CandidateSortData {
+                index,
+                score,
+                history_rank: history_ranks.and_then(|ranks| ranks.get(index).copied().flatten()),
+                length: sort_options.ties_by_length.then(|| text.chars().count()),
+                alphabetical_key: candidate_alphabetical_key(text, sort_options),
+            },
         })
 }
 
@@ -300,9 +297,7 @@ fn needs_candidate_tie_data(
     sort_options: SortOptions,
     history_ranks: Option<&[Option<usize>]>,
 ) -> bool {
-    history_ranks.is_some()
-        || sort_options.ties_by_length
-        || sort_options.ties_alphabetically
+    history_ranks.is_some() || sort_options.ties_by_length || sort_options.ties_alphabetically
 }
 
 /// Compute the highlight indices for one already-matched candidate.
@@ -371,10 +366,7 @@ fn interrupted_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
     build_list_3(env, sentinel, nil, nil)
 }
 
-fn build_scored_candidate_list<'e, T>(
-    env: &'e Env,
-    matches: &[T],
-) -> Result<Value<'e>>
+fn build_scored_candidate_list<'e, T>(env: &'e Env, matches: &[T]) -> Result<Value<'e>>
 where
     T: ScoredCandidateEntry<'e>,
 {
@@ -409,7 +401,10 @@ where
         })?;
         let entry = env.cons(
             value,
-            env.cons(scored.score().into_lisp(env)?, env.cons(indices_value, nil)?)?,
+            env.cons(
+                scored.score().into_lisp(env)?,
+                env.cons(indices_value, nil)?,
+            )?,
         )?;
         top_info = env.cons(entry, top_info)?;
     }
