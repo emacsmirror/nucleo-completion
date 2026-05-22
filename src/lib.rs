@@ -24,6 +24,12 @@ struct ScoredIndex {
     score: u32,
 }
 
+#[derive(Default)]
+struct MatchIndicesScratch {
+    utf32_buf: Vec<char>,
+    indices: Vec<u32>,
+}
+
 const PARALLEL_BATCH_SIZE: usize = 2048;
 const MIN_PARALLEL_ITEMS: usize = 8192;
 const MIN_PARALLEL_BYTES: usize = 3_000_000;
@@ -172,8 +178,18 @@ fn should_score_parallel(texts: &[String], workers: usize) -> bool {
 }
 
 fn should_score_parallel_workload(texts: &[String]) -> bool {
-    texts.len() >= MIN_PARALLEL_ITEMS
-        && texts.iter().map(|text| text.len()).sum::<usize>() >= MIN_PARALLEL_BYTES
+    if texts.len() < MIN_PARALLEL_ITEMS {
+        return false;
+    }
+
+    let mut bytes = 0;
+    for text in texts {
+        bytes += text.len();
+        if bytes >= MIN_PARALLEL_BYTES {
+            return true;
+        }
+    }
+    false
 }
 
 fn score_items_serial(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
@@ -311,12 +327,19 @@ fn compare_history_tie(
         return Ordering::Equal;
     };
 
-    match (history_ranks[a.index], history_ranks[b.index]) {
+    match (
+        history_rank(history_ranks, a.index),
+        history_rank(history_ranks, b.index),
+    ) {
         (Some(rank_a), Some(rank_b)) => rank_a.cmp(&rank_b),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
     }
+}
+
+fn history_rank(history_ranks: &[Option<usize>], index: usize) -> Option<usize> {
+    history_ranks.get(index).copied().flatten()
 }
 
 fn compare_length_tie(a: &ScoredIndex, b: &ScoredIndex, lengths: Option<&[usize]>) -> Ordering {
@@ -369,22 +392,38 @@ fn score_item_range(
 /// record positions, but the call only happens for the at most
 /// `highlight_limit` top-ranked candidates and so its cost is bounded
 /// by a small constant (default 25) regardless of the candidate-set
-/// size.  Score and indices share the underlying algorithm; coalescing
-/// them into a single per-candidate call would force allocating a
-/// `Vec<u32>` for every match instead of just for the top-ranked few,
-/// so the deliberate two-phase shape is retained.
-fn matched_indices(pattern: &Pattern, text: &str, matcher: &mut Matcher) -> Option<Vec<u32>> {
-    let mut buf = Vec::new();
-    let mut indices = Vec::new();
-    pattern.indices(Utf32Str::new(text, &mut buf), matcher, &mut indices)?;
-    indices.sort_unstable();
-    indices.dedup();
-    Some(indices)
+/// size.  The scratch vectors are reused across top-info entries so
+/// the bounded second pass does not allocate fresh UTF-32 or index
+/// buffers per highlighted candidate.  Score and indices share the
+/// underlying algorithm; coalescing them into a single per-candidate
+/// call would force storing indices for every match instead of just for
+/// the top-ranked few, so the deliberate two-phase shape is retained.
+fn matched_indices_into<'a>(
+    pattern: &Pattern,
+    text: &str,
+    matcher: &mut Matcher,
+    scratch: &'a mut MatchIndicesScratch,
+) -> Option<&'a [u32]> {
+    scratch.indices.clear();
+    pattern.indices(
+        Utf32Str::new(text, &mut scratch.utf32_buf),
+        matcher,
+        &mut scratch.indices,
+    )?;
+    scratch.indices.sort_unstable();
+    scratch.indices.dedup();
+    Some(&scratch.indices)
 }
 
-fn indices_to_lisp<'e>(env: &'e Env, indices: Vec<u32>) -> Result<Value<'e>> {
+#[cfg(test)]
+fn matched_indices(pattern: &Pattern, text: &str, matcher: &mut Matcher) -> Option<Vec<u32>> {
+    let mut scratch = MatchIndicesScratch::default();
+    matched_indices_into(pattern, text, matcher, &mut scratch).map(Vec::from)
+}
+
+fn indices_to_lisp<'e>(env: &'e Env, indices: &[u32]) -> Result<Value<'e>> {
     let mut result = env.intern("nil")?;
-    for index in indices.into_iter().rev() {
+    for &index in indices.iter().rev() {
         result = env.cons(index.into_lisp(env)?, result)?;
     }
     Ok(result)
@@ -415,52 +454,15 @@ fn interrupted_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
 
 fn build_candidates_list<'e>(
     env: &'e Env,
-    texts: &[String],
     values: &[Value<'e>],
     matches: &[ScoredIndex],
-    attach_scores: bool,
 ) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
     let mut candidates_list = nil;
     for scored in matches.iter().rev() {
-        let candidate = candidate_value(env, texts, values, scored, attach_scores)?;
-        candidates_list = env.cons(candidate, candidates_list)?;
+        candidates_list = env.cons(values[scored.index], candidates_list)?;
     }
     Ok(candidates_list)
-}
-
-fn candidate_value<'e>(
-    env: &'e Env,
-    texts: &[String],
-    values: &[Value<'e>],
-    scored: &ScoredIndex,
-    attach_score: bool,
-) -> Result<Value<'e>> {
-    if attach_score {
-        propertized_score_candidate(
-            env,
-            values[scored.index],
-            &texts[scored.index],
-            scored.score,
-        )
-    } else {
-        Ok(values[scored.index])
-    }
-}
-
-fn propertized_score_candidate<'e>(
-    env: &'e Env,
-    value: Value<'e>,
-    text: &str,
-    score: u32,
-) -> Result<Value<'e>> {
-    let copy = env.call("copy-sequence", [value])?;
-    let start = 0.into_lisp(env)?;
-    let end = text.chars().count().into_lisp(env)?;
-    let property = env.intern("nucleo-completion-score")?;
-    let score = score.into_lisp(env)?;
-    env.call("put-text-property", [start, end, property, score, copy])?;
-    Ok(copy)
 }
 
 fn build_top_info<'e>(
@@ -473,8 +475,9 @@ fn build_top_info<'e>(
 ) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
     let mut top_info = nil;
+    let mut scratch = MatchIndicesScratch::default();
     for scored in matches.iter().take(highlight_limit).rev() {
-        let entry = build_top_info_entry(env, pattern, texts, values, scored, nil)?;
+        let entry = build_top_info_entry(env, pattern, texts, values, scored, nil, &mut scratch)?;
         top_info = env.cons(entry, top_info)?;
     }
     Ok(top_info)
@@ -487,12 +490,14 @@ fn build_top_info_entry<'e>(
     values: &[Value<'e>],
     scored: &ScoredIndex,
     nil: Value<'e>,
+    scratch: &mut MatchIndicesScratch,
 ) -> Result<Value<'e>> {
-    let indices_value =
-        match with_matcher(|matcher| matched_indices(pattern, &texts[scored.index], matcher)) {
-            Some(indices) => indices_to_lisp(env, indices)?,
-            None => nil,
-        };
+    let indices_value = with_matcher(|matcher| {
+        match matched_indices_into(pattern, &texts[scored.index], matcher, scratch) {
+            Some(indices) => indices_to_lisp(env, indices),
+            None => Ok(nil),
+        }
+    })?;
     env.cons(
         values[scored.index],
         env.cons(scored.score.into_lisp(env)?, env.cons(indices_value, nil)?)?,
@@ -525,7 +530,7 @@ fn build_candidate_bundle<'e>(
     highlight_limit: usize,
     return_all_scores: bool,
 ) -> Result<Value<'e>> {
-    let candidates_list = build_candidates_list(env, texts, values, matches, return_all_scores)?;
+    let candidates_list = build_candidates_list(env, values, matches)?;
     let top_info = build_top_info(env, pattern, texts, values, matches, highlight_limit)?;
     let full_scores = build_full_scores(env, matches, return_all_scores)?;
     build_list_3(env, candidates_list, top_info, full_scores)
@@ -552,10 +557,7 @@ fn candidates_impl<'e>(
     let sort_options =
         SortOptions::from_lisp(sort_ties_by_length, sort_ties_alphabetically, ignore_case);
     let history_ranks = match history_ranks {
-        Some(value) => {
-            let ranks = collect_history_ranks(value)?;
-            (ranks.len() == texts.len()).then_some(ranks)
-        }
+        Some(value) => Some(collect_history_ranks(value)?),
         None => None,
     };
     let pattern = Pattern::parse(&pattern, case_matching(ignore_case), Normalization::Smart);
@@ -932,10 +934,65 @@ mod tests {
     }
 
     #[test]
+    fn sort_scored_treats_missing_history_ranks_as_unranked() {
+        let texts = vec!["bbb".into(), "aa".into(), "ccc".into()];
+        let scored = vec![
+            ScoredIndex {
+                index: 0,
+                score: 10,
+            },
+            ScoredIndex {
+                index: 1,
+                score: 10,
+            },
+            ScoredIndex {
+                index: 2,
+                score: 10,
+            },
+        ];
+        let history_ranks = vec![Some(1), Some(0)];
+
+        let sorted = sort_scored(
+            scored,
+            &texts,
+            SortOptions {
+                ties_by_length: false,
+                ties_alphabetically: false,
+                ignore_case: false,
+            },
+            Some(&history_ranks),
+        );
+
+        assert_eq!(
+            sorted
+                .into_iter()
+                .map(|scored| scored.index)
+                .collect::<Vec<_>>(),
+            vec![1, 0, 2]
+        );
+    }
+
+    #[test]
     fn matched_indices_returns_sorted_unique_positions() {
         let pattern = Pattern::parse("foo", CaseMatching::Respect, Normalization::Smart);
         let indices = with_matcher(|matcher| matched_indices(&pattern, "xfoox", matcher));
 
         assert_eq!(indices, Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn matched_indices_scratch_clears_between_candidates() {
+        let pattern = Pattern::parse("foo", CaseMatching::Respect, Normalization::Smart);
+        let mut scratch = MatchIndicesScratch::default();
+
+        let first = with_matcher(|matcher| {
+            matched_indices_into(&pattern, "xfoox", matcher, &mut scratch).map(Vec::from)
+        });
+        let second = with_matcher(|matcher| {
+            matched_indices_into(&pattern, "foo", matcher, &mut scratch).map(Vec::from)
+        });
+
+        assert_eq!(first, Some(vec![1, 2, 3]));
+        assert_eq!(second, Some(vec![0, 1, 2]));
     }
 }

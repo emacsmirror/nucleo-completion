@@ -16,6 +16,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check Rust formatting
+        run: cargo fmt --check
 
       - name: Install Emacs
         run: |
@@ -28,8 +33,17 @@ jobs:
       - name: Test Rust module
         run: cargo test --release
 
+      - name: Lint Rust module
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Byte compile Elisp
-        run: emacs -Q --batch -L . -L target/release --eval '(byte-compile-file "nucleo-completion.el")'
+        run: emacs -Q --batch -L . -L target/release --eval '(setq byte-compile-error-on-warn t)' --eval '(byte-compile-file "nucleo-completion.el")'
+
+      - name: Check Elisp documentation
+        run: emacs -Q --batch -L . --eval '(progn (require (quote checkdoc)) (unless (checkdoc-file "nucleo-completion.el") (kill-emacs 1)))'
+
+      - name: Check Elisp declarations
+        run: emacs -Q --batch -L . --eval '(when (check-declare-file "nucleo-completion.el") (kill-emacs 1))'
 
       - name: Run ERT
         run: emacs -Q --batch -L . -L target/release -L test -l test/nucleo-completion-tests.el -f ert-run-tests-batch-and-exit

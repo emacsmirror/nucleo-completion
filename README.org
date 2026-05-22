@@ -116,7 +116,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.12")
+  (setq nucleo-completion-module-release-tag "v0.1.13")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -170,9 +170,13 @@ release artifacts named
 - ~aarch64-apple-darwin~
 - ~x86_64-pc-windows-msvc~
 
-Run the workflow manually with the release tag to upload assets to an existing
-GitHub Release.  Linux binaries are sensitive to libc compatibility; for broad
-Linux distribution, consider adding a musl release asset.
+Run the workflow manually with the release tag matching the package version,
+for example ~v0.1.13~, to upload assets to an existing GitHub Release.  The
+workflow checks that the tag matches both the Cargo package version and
+~nucleo-completion-required-module-version~, then runs the same Rust and Elisp
+verification gates as CI before building release assets.  Linux binaries are
+sensitive to libc compatibility; for broad Linux distribution, consider adding
+a musl release asset.
 
 * Specification
 
@@ -254,7 +258,8 @@ band highlighting requires the Rust module.
 
 ~nucleo-completion-regexp-functions~ can add language-specific matchers.
 Each function receives one whitespace-separated search term and returns a
-regexp string, a list of regexp strings, or nil.
+non-empty regexp string, a list of non-empty regexp strings, or nil.  Empty or
+invalid regexps are ignored.
 Regexp expander results are cached for each completion pass, so user
 configuration normally does not need its own per-term cache.
 The default ~nucleo-completion-regexp-minimum-term-length~ is 2, so expanders do
