@@ -232,6 +232,27 @@ When the Rust module is unavailable, the Emacs Lisp fallback treats every match
 as equal-scoring and applies the same history, length, and alphabetical
 tie-breakers to the filtered candidates.
 
+** Corfu Sorting
+
+When using Corfu, keep ~corfu-sort-override-function~ nil if you want to
+preserve Nucleo's score order:
+
+#+begin_src emacs-lisp
+  (setq corfu-sort-override-function nil)
+#+end_src
+
+Corfu's override sort function runs after completion metadata sorting and can
+reorder candidates that ~nucleo-completion~ has already ranked.  This also
+applies to combined sorting configurations that explicitly run both the
+completion table's ~display-sort-function~ and ~corfu-sort-function~.
+
+~nucleo-completion-sort-ties-by-history~ uses different history sources
+depending on where completion runs.  In ordinary buffers, it uses
+~corfu-history~ when ~corfu-history-mode~ is enabled.  In minibuffers, such as
+~M-:~, it uses the active ~minibuffer-history-variable~ instead.  Candidates
+selected through Corfu history are therefore not promoted in minibuffer
+completion unless they also appear in that minibuffer history source.
+
 ** Score Band Highlighting
 
 By default, ~nucleo-completion~ only highlights the matching parts of each
