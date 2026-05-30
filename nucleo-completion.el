@@ -4,7 +4,7 @@
 
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
-;; Version: 0.1.14
+;; Version: 0.1.15
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
@@ -81,7 +81,8 @@ ANDed together."
   "Whether to warn when a regexp expander signals an error.
 When nil, failing functions in `nucleo-completion-regexp-functions'
 are ignored.  When non-nil, each failing function is reported once
-with `display-warning' and then ignored for that call."
+per Emacs session with `display-warning'.  Later failures from the
+same function are still ignored, but are not reported again."
   :type 'boolean
   :group 'nucleo-completion)
 
@@ -209,7 +210,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defconst nucleo-completion-required-module-version "0.1.14"
+(defconst nucleo-completion-required-module-version "0.1.15"
   "Version of the prebuilt Rust module expected by this package.")
 
 (defcustom nucleo-completion-module-release-tag nil
@@ -252,8 +253,14 @@ never prompts."
 (defvar-local nucleo-completion--current-prefix ""
   "Prefix corresponding to `nucleo-completion--current-result'.")
 
+(defvar-local nucleo-completion--current-pattern nil
+  "Completion pattern corresponding to `nucleo-completion--current-result'.")
+
 (defvar-local nucleo-completion--current-base-size nil
   "Completion table base-size for `nucleo-completion--current-result'.")
+
+(defvar-local nucleo-completion--current-context nil
+  "Completion context corresponding to `nucleo-completion--current-result'.")
 
 (defvar nucleo-completion-module-load-errors nil
   "Dynamic module load failures from the last load attempt.
@@ -324,6 +331,30 @@ When CACHE is not a hash table, call PRODUCER without caching."
             (puthash key value cache)
             value)))
     (funcall producer)))
+
+(defmacro nucleo-completion--with-completion-pass-caches (&rest body)
+  "Run BODY with caches shared by one completion filtering pass.
+These caches are dynamically scoped so regexp expansion, term
+splitting, and subsequence regexp construction agree across the
+setup, filtering, and highlighting work for the same user input."
+  (declare (indent 0) (debug (body)))
+  `(let* ((nucleo-completion--terms-cache
+           (make-hash-table :test #'equal))
+          (nucleo-completion--subsequence-regexp-cache
+           (make-hash-table :test #'equal))
+          (nucleo-completion--regexp-cache
+           (and nucleo-completion-regexp-functions
+                (make-hash-table :test #'equal))))
+     ,@body))
+
+(defmacro nucleo-completion--while-no-input-tagged (&rest body)
+  "Run BODY under `while-no-input' and wrap completed values.
+`while-no-input' returns t when input arrives, but
+`try-completion' also uses t for an exact match.  Wrapping
+completed BODY values lets callers distinguish those cases."
+  (declare (indent 0) (debug (body)))
+  `(while-no-input
+     (list (progn ,@body))))
 
 (defun nucleo-completion--rust-library-name ()
   "Return Cargo's dynamic library file name for this platform."
@@ -424,6 +455,18 @@ When CACHE is not a hash table, call PRODUCER without caching."
     (when triple
       (list (nucleo-completion--module-install-directory triple)))))
 
+(defun nucleo-completion--development-module-directories ()
+  "Return source-tree module directories used during local development."
+  (list nucleo-completion--directory
+        (expand-file-name "target/release" nucleo-completion--directory)
+        (expand-file-name "target/debug" nucleo-completion--directory)))
+
+(defun nucleo-completion--module-files-in-directories (library directories)
+  "Return candidate module files named LIBRARY in DIRECTORIES."
+  (mapcar (lambda (directory)
+            (expand-file-name library directory))
+          directories))
+
 (defun nucleo-completion--installed-module-release-name (file)
   "Return the local release directory name for installed module FILE.
 Return nil when FILE is not under `nucleo-completion-module-directory'."
@@ -522,27 +565,26 @@ call path without a built binary."
 (defun nucleo-completion--module-candidates ()
   "Return candidate paths for the Rust dynamic module."
   (when (nucleo-completion--dynamic-modules-supported-p)
-    (let ((library (nucleo-completion--rust-library-name)))
+    (let* ((library (nucleo-completion--rust-library-name))
+           (preferred-directories
+            (append
+             (nucleo-completion--installed-module-directories)
+             (nucleo-completion--prebuilt-module-directories)
+             (nucleo-completion--development-module-directories)))
+           (preferred-files
+            (nucleo-completion--module-files-in-directories
+             library preferred-directories))
+           (load-path-files
+            (list
+             (locate-library "nucleo-completion-module"
+                             nil (list module-file-suffix))
+             (locate-library library)))
+           (stale-files
+            (nucleo-completion--module-files-in-directories
+             library
+             (nucleo-completion--stale-installed-module-directories))))
       (delete-dups
-       (delq nil
-             (append
-              (mapcar (lambda (dir)
-                        (expand-file-name library dir))
-                      (append
-                       (nucleo-completion--installed-module-directories)
-                       (nucleo-completion--prebuilt-module-directories)
-                       (list nucleo-completion--directory
-                             (expand-file-name "target/release"
-                                               nucleo-completion--directory)
-                             (expand-file-name "target/debug"
-                                               nucleo-completion--directory))))
-              (list
-               (locate-library "nucleo-completion-module"
-                               nil (list module-file-suffix))
-               (locate-library library))
-              (mapcar (lambda (dir)
-                        (expand-file-name library dir))
-                      (nucleo-completion--stale-installed-module-directories))))))))
+       (delq nil (append preferred-files load-path-files stale-files))))))
 
 (defun nucleo-completion--highlight-limit ()
   "Return a sanitized value for eager or module highlight limits."
@@ -1380,13 +1422,6 @@ CANDIDATE-A, and nil when history does not order them."
      (rank-b 'after)
      (t nil))))
 
-(defun nucleo-completion--history-rank-less-p
-    (candidate-a candidate-b rank-table)
-  "Return non-nil when CANDIDATE-A outranks CANDIDATE-B in RANK-TABLE."
-  (eq (nucleo-completion--history-rank-order
-       candidate-a candidate-b rank-table)
-      'before))
-
 (defun nucleo-completion--history-sort-before-p
     (candidate-a score-a position-a candidate-b score-b position-b rank-table)
   "Return non-nil when A should sort before B for history tie sorting.
@@ -1499,13 +1534,20 @@ history-aware batch API.  BUNDLE must include FULL-SCORES."
               (mapcar #'cadr items))))))
 
 (defun nucleo-completion--ascii-string-p (string)
-  "Return non-nil if every character in STRING is ASCII."
+  "Return non-nil if every Unicode character in STRING is ASCII.
+Completion frontends may append internal disambiguation characters
+above Unicode's maximum codepoint.  Those markers are not visible
+text, so they should not promote otherwise ASCII regexp-only
+candidates ahead of Nucleo-scored matches."
   (let ((index 0)
         (length (length string))
+        (max nucleo-completion--max-unicode-codepoint)
         (ascii t))
     (while (and ascii (< index length))
-      (when (> (aref string index) #x7f)
-        (setq ascii nil))
+      (let ((character (aref string index)))
+        (when (and (<= character max)
+                   (> character #x7f))
+          (setq ascii nil)))
       (setq index (1+ index)))
     ascii))
 
@@ -2002,7 +2044,8 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
          top-info
          full-scores)
     (when (nucleo-completion--bundle-interrupted-p bundle)
-      (throw 'nucleo-completion-interrupted t))
+      (throw 'nucleo-completion-interrupted
+             nucleo-completion--interrupted-sentinel))
     (when (and history-rank-table (not module-history-p))
       (setq bundle
             (nucleo-completion--sort-bundle-ties-by-history
@@ -2037,17 +2080,79 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
     (list (nucleo-completion--fallback-filter needle all prefix)
           nil nil nil))))
 
+(defun nucleo-completion--completion-context (table pred regexp-list)
+  "Return the completion context for an interrupt-reusable result.
+TABLE and PRED identify the completion source.  REGEXP-LIST is
+the caller's external `completion-regexp-list'.  The remaining
+values are filtering options that can change which candidates are
+available or how the reusable snapshot is ordered."
+  (list table
+        pred
+        (if (listp regexp-list) (copy-sequence regexp-list) regexp-list)
+        completion-ignore-case
+        (if (listp nucleo-completion-regexp-functions)
+            (copy-sequence nucleo-completion-regexp-functions)
+          nucleo-completion-regexp-functions)
+        (nucleo-completion--regexp-minimum-term-length)
+        nucleo-completion-sort-ties-by-history
+        nucleo-completion-sort-ties-by-length
+        nucleo-completion-sort-ties-alphabetically
+        nucleo-completion-regexp-only-match-priority))
+
+(defun nucleo-completion--completion-context-matches-p
+    (context table pred regexp-list)
+  "Return non-nil when CONTEXT can be reused for TABLE, PRED, and REGEXP-LIST.
+The completion table and predicate are compared by identity.  A
+matching prefix is not enough: interrupt reuse must not leak
+candidates from a different completion source."
+  (pcase context
+    (`(,old-table ,old-pred ,old-regexp-list ,old-ignore-case
+                  ,old-regexp-functions ,old-regexp-minimum-term-length
+                  ,old-sort-history ,old-sort-length ,old-sort-alpha
+                  ,old-regexp-priority)
+     (and (eq old-table table)
+          (eq old-pred pred)
+          (equal old-regexp-list regexp-list)
+          (eq old-ignore-case completion-ignore-case)
+          (equal old-regexp-functions nucleo-completion-regexp-functions)
+          (equal old-regexp-minimum-term-length
+                 (nucleo-completion--regexp-minimum-term-length))
+          (eq old-sort-history nucleo-completion-sort-ties-by-history)
+          (eq old-sort-length nucleo-completion-sort-ties-by-length)
+          (eq old-sort-alpha nucleo-completion-sort-ties-alphabetically)
+          (eq old-regexp-priority
+              nucleo-completion-regexp-only-match-priority)))))
+
 (defun nucleo-completion--record-current-result
-    (prefix needle all &optional base-size)
+    (prefix needle all context &optional base-size)
   "Record ALL as the current completion result for PREFIX and NEEDLE.
+CONTEXT describes the completion source that produced ALL.
 BASE-SIZE is the completion table's base-size marker before
 PREFIX is applied."
   (let ((prefix (if (stringp prefix) prefix "")))
     (setq nucleo-completion--filtering-p (not (string= needle "")))
     (setq nucleo-completion--current-prefix prefix
+          nucleo-completion--current-pattern needle
           nucleo-completion--current-base-size base-size
+          nucleo-completion--current-context context
           nucleo-completion--current-result
           (copy-sequence all))))
+
+(defun nucleo-completion--current-pattern-refinement-p (pattern)
+  "Return non-nil when PATTERN can reuse the current result.
+The cached result was already filtered by
+`nucleo-completion--current-pattern'.  Re-filtering it is only
+complete when the new pattern is a simple extension of that older
+pattern; after deletion or unrelated edits the old candidate set
+may be too narrow.  Configured regexp expanders can be
+non-monotonic, so only identical regexp-expanded patterns are
+reused."
+  (and (stringp nucleo-completion--current-pattern)
+       (or (string= nucleo-completion--current-pattern pattern)
+           (and (not nucleo-completion-regexp-functions)
+                (string-prefix-p nucleo-completion--current-pattern
+                                 pattern
+                                 completion-ignore-case)))))
 
 (defun nucleo-completion--clear-completion-state (prefix filtering-p)
   "Clear reusable completion state for PREFIX.
@@ -2055,7 +2160,9 @@ FILTERING-P becomes the new value of
 `nucleo-completion--filtering-p'."
   (setq nucleo-completion--filtering-p filtering-p
         nucleo-completion--current-prefix (if (stringp prefix) prefix "")
+        nucleo-completion--current-pattern nil
         nucleo-completion--current-base-size nil
+        nucleo-completion--current-context nil
         nucleo-completion--current-result nil)
   (when (boundp 'completion-lazy-hilit-fn)
     (setq completion-lazy-hilit-fn nil)))
@@ -2093,6 +2200,16 @@ for score-band classification."
                      exact-word-regexp-cache))
                 (nucleo-completion--highlight-candidate
                  needle (copy-sequence candidate) score max-score indices)))))))
+
+(defun nucleo-completion--install-interrupted-lazy-highlight (needle)
+  "Install lazy highlighting for an interrupt-reused NEEDLE.
+Interrupted reuse filters an older ranked snapshot and has no
+module score or index data for the current input, so avoid using
+stale score properties from the reused candidates."
+  (setq completion-lazy-hilit-fn
+        (lambda (candidate)
+          (nucleo-completion--highlight-candidate
+           needle (copy-sequence candidate)))))
 
 (defun nucleo-completion--highlight-eager
     (needle all top-info max-score highlight-limit)
@@ -2294,6 +2411,8 @@ is the precomputed result of `nucleo-completion--field-state'."
                (expanded-regexp-p
                 (nucleo-completion--expanded-regexp-p pattern))
                (external-completion-regexp-list completion-regexp-list)
+               (context (nucleo-completion--completion-context
+                         table pred external-completion-regexp-list))
                (initial-regexp-list-data
                 (nucleo-completion--initial-regexp-list-data
                  prefix pattern table pred module-p expanded-regexp-p
@@ -2305,13 +2424,15 @@ is the precomputed result of `nucleo-completion--field-state'."
                               generated-regexp-list-p))
                (all (car initial-data))
                (base-size (cdr initial-data)))
+    (unless (equal prefix nucleo-completion--current-prefix)
+      (nucleo-completion--clear-completion-state prefix nil))
     (pcase-let ((`(,all ,_bundle ,_top-info ,_full-scores)
                  (nucleo-completion--filter-completions
                   prefix pattern all module-p expanded-regexp-p 0 nil)))
       (if all
           (progn
             (nucleo-completion--record-current-result
-             prefix pattern all base-size)
+             prefix pattern all context base-size)
             (nucleo-completion--refine-try-result
              (nucleo-completion--try-result
               string point prefix pattern suffix all)
@@ -2343,33 +2464,162 @@ semantics."
          (completion-flex-try-completion string table pred point)
          string point table pred))
        (t
-        (let* ((nucleo-completion--terms-cache
-                (make-hash-table :test #'equal))
-               (nucleo-completion--subsequence-regexp-cache
-                (make-hash-table :test #'equal))
-               (nucleo-completion--regexp-cache
-                (and nucleo-completion-regexp-functions
-                     (make-hash-table :test #'equal)))
-               (expanded-regexp-p
-                (nucleo-completion--expanded-regexp-p pattern)))
-          (if (nucleo-completion--complex-try-p pattern expanded-regexp-p)
-              (nucleo-completion--try-completion-with-filter
-               string table pred point field-state)
-            (let ((result (completion-flex-try-completion
-                           string table pred point)))
-              (if result
-                  (progn
-                    (nucleo-completion--clear-completion-state prefix t)
-                    (nucleo-completion--refine-try-result
-                     result string point table pred))
+        (nucleo-completion--with-completion-pass-caches
+          (let ((expanded-regexp-p
+                 (nucleo-completion--expanded-regexp-p pattern)))
+            (if (nucleo-completion--complex-try-p pattern expanded-regexp-p)
                 (nucleo-completion--try-completion-with-filter
-                 string table pred point field-state))))))))))
+                 string table pred point field-state)
+              (let ((result (completion-flex-try-completion
+                             string table pred point)))
+                (if result
+                    (progn
+                      (nucleo-completion--clear-completion-state prefix t)
+                      (nucleo-completion--refine-try-result
+                       result string point table pred))
+                  (nucleo-completion--try-completion-with-filter
+                   string table pred point field-state)))))))))))
+
+(defun nucleo-completion--try-completion-interrupted-result
+    (string table pred point)
+  "Return a reusable `try-completion' result after interrupted filtering.
+STRING, TABLE, PRED, and POINT follow `completion-try-completion'
+semantics.
+The Rust module can report interruption after a newer input event
+arrives.  In that case, mirror `nucleo-completion-all-completions'
+by deriving a transient result from the last filtered candidate
+set, but only when it belongs to the same completion prefix and
+still matches the current completion pattern.  The snapshot has
+already been ranked, so reuse filters it without applying fallback
+tie sorting again."
+  (when (consp nucleo-completion--current-result)
+    (pcase-let ((`(,point ,prefix ,_before ,_field-suffix ,suffix ,pattern)
+                 (nucleo-completion--field-state string table pred point)))
+      (when (and (equal prefix nucleo-completion--current-prefix)
+                 (nucleo-completion--completion-context-matches-p
+                  nucleo-completion--current-context
+                  table pred completion-regexp-list)
+                 (nucleo-completion--current-pattern-refinement-p pattern)
+                 (not (string= pattern ""))
+                 (not (nucleo-completion--flex-nospace-p pattern)))
+        (let ((candidates
+               (nucleo-completion--with-completion-pass-caches
+                 (nucleo-completion--regexp-filter
+                  pattern nucleo-completion--current-result))))
+          (when candidates
+            (nucleo-completion--refine-try-result
+             (nucleo-completion--try-result
+              string point prefix pattern suffix candidates)
+             string point table pred)))))))
+
+(defun nucleo-completion--all-completions-interrupted-result
+    (string table pred point)
+  "Return reusable `all-completions' data after interrupted filtering.
+STRING, TABLE, PRED, and POINT follow `completion-all-completions'
+semantics.
+Reuse the last filtered candidate set only when it belongs to the
+same completion prefix and still matches the current completion
+pattern.  This keeps a stale interrupted pass from leaking
+candidates from another completion boundary.  The snapshot has
+already been ranked, so reuse filters it without applying fallback
+tie sorting again."
+  (when (consp nucleo-completion--current-result)
+    (pcase-let ((`(,_point ,prefix ,_before ,_field-suffix ,_suffix ,pattern)
+                 (nucleo-completion--field-state string table pred point)))
+      (when (and (equal prefix nucleo-completion--current-prefix)
+                 (nucleo-completion--completion-context-matches-p
+                  nucleo-completion--current-context
+                  table pred completion-regexp-list)
+                 (nucleo-completion--current-pattern-refinement-p pattern)
+                 (not (string= pattern ""))
+                 (not (nucleo-completion--flex-nospace-p pattern)))
+        (let ((candidates
+               (nucleo-completion--with-completion-pass-caches
+                 (nucleo-completion--regexp-filter
+                  pattern nucleo-completion--current-result))))
+          (when candidates
+            (when (bound-and-true-p completion-lazy-hilit)
+              (nucleo-completion--install-interrupted-lazy-highlight
+               pattern))
+            (nucleo-completion--with-base-size
+             prefix
+             candidates
+             nucleo-completion--current-base-size)))))))
 
 ;;;###autoload
 (defun nucleo-completion-try-completion (string table pred point)
   "Try completing STRING in TABLE with the Nucleo completion style.
 PRED and POINT follow `completion-try-completion' semantics."
-  (nucleo-completion--try-completion-1 string table pred point))
+  (let ((result
+         (nucleo-completion--while-no-input-tagged
+           (catch 'nucleo-completion-interrupted
+             (nucleo-completion--try-completion-1 string table pred point)))))
+    (cond
+     ((eq result t)
+      (nucleo-completion--try-completion-interrupted-result
+       string table pred point))
+     ((not (consp result)) nil)
+     ((eq (car result) nucleo-completion--interrupted-sentinel)
+      (nucleo-completion--try-completion-interrupted-result
+       string table pred point))
+     (t
+      (car result)))))
+
+(defun nucleo-completion--all-completions-empty-pattern
+    (prefix table pred regexp-list)
+  "Return completion results when the completion field is empty.
+PREFIX, TABLE, and PRED describe the active completion field.
+REGEXP-LIST is the caller's `completion-regexp-list'."
+  (nucleo-completion--reset-completion-state)
+  (pcase-let ((`(,all . ,base-size)
+               (nucleo-completion--split-base-size
+                (nucleo-completion--initial-completion-candidates
+                 prefix "" table pred regexp-list))))
+    (nucleo-completion--with-base-size prefix all base-size)))
+
+(defun nucleo-completion--all-completions-filtered
+    (prefix pattern table pred)
+  "Return filtered completion results for non-empty PATTERN.
+PREFIX, TABLE, and PRED describe the active completion field."
+  (let* ((module-p (nucleo-completion--module-ready-p))
+         (expanded-regexp-p
+          (nucleo-completion--expanded-regexp-p pattern))
+         (highlight-limit (nucleo-completion--highlight-limit))
+         (lazy-hilit-p (bound-and-true-p completion-lazy-hilit))
+         (need-full-scores
+          (and lazy-hilit-p nucleo-completion-highlight-score-bands))
+         (external-completion-regexp-list completion-regexp-list)
+         (context (nucleo-completion--completion-context
+                   table pred external-completion-regexp-list))
+         (initial-regexp-list-data
+          (nucleo-completion--initial-regexp-list-data
+           prefix pattern table pred module-p expanded-regexp-p
+           external-completion-regexp-list))
+         (completion-regexp-list (car initial-regexp-list-data))
+         (generated-regexp-list-p (cdr initial-regexp-list-data))
+         (initial-data
+          (nucleo-completion--initial-completion-data
+           prefix pattern table pred completion-regexp-list
+           generated-regexp-list-p)))
+    (pcase-let ((`(,all . ,base-size) initial-data))
+      (unless (equal prefix nucleo-completion--current-prefix)
+        (nucleo-completion--clear-completion-state prefix nil))
+      (pcase-let* ((`(,all ,_bundle ,top-info ,full-scores)
+                    (nucleo-completion--filter-completions
+                     prefix pattern all module-p expanded-regexp-p
+                     highlight-limit need-full-scores))
+                   (max-score (nucleo-completion--max-score
+                               top-info full-scores)))
+        (if all
+            (progn
+              (nucleo-completion--record-current-result
+               prefix pattern all context base-size)
+              (setq all (nucleo-completion--highlight-completions
+                         pattern all top-info max-score
+                         highlight-limit lazy-hilit-p))
+              (nucleo-completion--with-base-size prefix all base-size))
+          (nucleo-completion--reset-completion-state)
+          nil)))))
 
 (defun nucleo-completion--all-completions-1 (string table &optional pred point)
   "Get Nucleo completions of STRING in TABLE.
@@ -2377,60 +2627,16 @@ See `completion-all-completions' for the semantics of PRED and POINT."
   (let ((nucleo-completion--exact-word-regexp-cache nil))
     (pcase-let ((`(,_point ,prefix ,_before ,_field-suffix ,_suffix ,pattern)
                  (nucleo-completion--field-state string table pred point)))
-      (if (nucleo-completion--flex-nospace-p pattern)
-          (nucleo-completion--reset-completion-state)
-        (if (string= pattern "")
-            (progn
-              (nucleo-completion--reset-completion-state)
-              (pcase-let ((`(,all . ,base-size)
-                           (nucleo-completion--split-base-size
-                            (nucleo-completion--initial-completion-candidates
-                             prefix pattern table pred completion-regexp-list))))
-                (nucleo-completion--with-base-size prefix all base-size)))
-          (let* ((nucleo-completion--terms-cache
-                  (make-hash-table :test #'equal))
-                 (nucleo-completion--subsequence-regexp-cache
-                  (make-hash-table :test #'equal))
-                 (nucleo-completion--regexp-cache
-                  (and nucleo-completion-regexp-functions
-                       (make-hash-table :test #'equal)))
-                 (module-p (nucleo-completion--module-ready-p))
-                 (expanded-regexp-p
-                  (nucleo-completion--expanded-regexp-p pattern))
-                 (highlight-limit (nucleo-completion--highlight-limit))
-                 (lazy-hilit-p (bound-and-true-p completion-lazy-hilit))
-                 (need-full-scores
-                  (and lazy-hilit-p nucleo-completion-highlight-score-bands))
-                 (external-completion-regexp-list completion-regexp-list)
-                 (initial-regexp-list-data
-                  (nucleo-completion--initial-regexp-list-data
-                   prefix pattern table pred module-p expanded-regexp-p
-                   external-completion-regexp-list))
-                 (completion-regexp-list (car initial-regexp-list-data))
-                 (generated-regexp-list-p (cdr initial-regexp-list-data))
-                 (initial-data
-                  (nucleo-completion--initial-completion-data
-                   prefix pattern table pred completion-regexp-list
-                   generated-regexp-list-p)))
-            (pcase-let ((`(,all . ,base-size) initial-data))
-              (unless (equal prefix nucleo-completion--current-prefix)
-                (nucleo-completion--clear-completion-state prefix nil))
-              (pcase-let* ((`(,all ,_bundle ,top-info ,full-scores)
-                            (nucleo-completion--filter-completions
-                             prefix pattern all module-p expanded-regexp-p
-                             highlight-limit need-full-scores))
-                           (max-score (nucleo-completion--max-score
-                                       top-info full-scores)))
-                (if all
-                    (progn
-                      (nucleo-completion--record-current-result
-                       prefix pattern all base-size)
-                      (setq all (nucleo-completion--highlight-completions
-                                 pattern all top-info max-score
-                                 highlight-limit lazy-hilit-p))
-                      (nucleo-completion--with-base-size prefix all base-size))
-                  (nucleo-completion--reset-completion-state)
-                  nil)))))))))
+      (cond
+       ((nucleo-completion--flex-nospace-p pattern)
+        (nucleo-completion--reset-completion-state))
+       ((string= pattern "")
+        (nucleo-completion--all-completions-empty-pattern
+         prefix table pred completion-regexp-list))
+       (t
+        (nucleo-completion--with-completion-pass-caches
+          (nucleo-completion--all-completions-filtered
+           prefix pattern table pred)))))))
 
 ;;;###autoload
 (defun nucleo-completion-all-completions (string table &optional pred point)
@@ -2438,19 +2644,21 @@ See `completion-all-completions' for the semantics of PRED and POINT."
 PRED and POINT follow `completion-all-completions' semantics.
 Wrap filtering with `while-no-input' so interactive typing can
 interrupt expensive scoring."
-  (pcase (while-no-input
+  (let ((result
+         (nucleo-completion--while-no-input-tagged
            (catch 'nucleo-completion-interrupted
              (nucleo-completion--all-completions-1
-              string table pred point)))
-    ('nil nil)
-    ('t
-     (when (consp nucleo-completion--current-result)
-       (let ((result (copy-sequence nucleo-completion--current-result)))
-         (nucleo-completion--with-base-size
-          nucleo-completion--current-prefix
-          result
-          nucleo-completion--current-base-size))))
-    (result result)))
+              string table pred point)))))
+    (cond
+     ((eq result t)
+      (nucleo-completion--all-completions-interrupted-result
+       string table pred point))
+     ((not (consp result)) nil)
+     ((eq (car result) nucleo-completion--interrupted-sentinel)
+      (nucleo-completion--all-completions-interrupted-result
+       string table pred point))
+     (t
+      (car result)))))
 
 ;;;###autoload
 (defun nucleo-completion-adjust-metadata (metadata)

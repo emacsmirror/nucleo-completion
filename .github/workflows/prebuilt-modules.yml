@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: GitHub Release tag to upload assets to, for example v0.1.14
+        description: GitHub Release tag to upload assets to, for example v0.1.15
         required: true
 
 jobs:
@@ -106,6 +106,78 @@ jobs:
 
       - name: Build module
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Install Emacs (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox
+
+      - name: Install Emacs (macOS)
+        if: runner.os == 'macOS'
+        run: brew install emacs
+
+      - name: Install Emacs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install emacs -y --no-progress
+
+      - name: Verify module loads (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          emacs -Q --batch \
+            -L . \
+            -L "target/${{ matrix.target }}/release" \
+            -l nucleo-completion.el \
+            --eval '(progn
+                      (unless (featurep (quote nucleo-completion-module))
+                        (error "nucleo-completion module did not load"))
+                      (unless (string= (nucleo-completion-module-version)
+                                       nucleo-completion-required-module-version)
+                        (error "loaded module version mismatch"))
+                      (unless (equal (car (nucleo-completion-candidates
+                                           "fb" (list "fb" "foo-baz" "bar")
+                                           nil nil nil 0 nil))
+                                     (list "fb" "foo-baz"))
+                        (error "loaded module did not score candidates")))'
+
+      - name: Verify module loads (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $emacs = (Get-Command emacs -ErrorAction SilentlyContinue).Source
+          if (-not $emacs) {
+            $emacs = Get-ChildItem "$env:ProgramFiles\Emacs" -Recurse -Filter emacs.exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $emacs) {
+            $emacs = Get-ChildItem "$env:ChocolateyInstall\lib" -Recurse -Filter emacs.exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $emacs) {
+            throw "emacs.exe not found"
+          }
+          $eval = @'
+          (progn
+            (unless (featurep (quote nucleo-completion-module))
+              (error "nucleo-completion module did not load"))
+            (unless (string= (nucleo-completion-module-version)
+                             nucleo-completion-required-module-version)
+              (error "loaded module version mismatch"))
+            (unless (equal (car (nucleo-completion-candidates
+                                 "fb" (list "fb" "foo-baz" "bar")
+                                 nil nil nil 0 nil))
+                           (list "fb" "foo-baz"))
+              (error "loaded module did not score candidates")))
+          '@
+          & $emacs -Q --batch `
+            -L . `
+            -L "target/${{ matrix.target }}/release" `
+            -l nucleo-completion.el `
+            --eval $eval
 
       - name: Stage module
         shell: bash

@@ -10,7 +10,16 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: emacs-${{ matrix.emacs }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            emacs: "27.1"
+          - os: ubuntu-latest
+            emacs: distro
 
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +35,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y emacs-nox
+
+      - name: Show Emacs version
+        run: emacs -Q --batch --eval '(princ (format "Emacs %s\n" emacs-version))'
 
       - name: Build Rust module
         run: cargo build --release

@@ -2,6 +2,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(setq load-prefer-newer t)
 (eval-and-compile
   (let ((file (or load-file-name
                   (and (boundp 'byte-compile-current-file)
@@ -42,6 +43,15 @@ populated when RETURN-ALL-SCORES is non-nil."
         triples
         (when return-all-scores
           (mapcar #'cadr triples))))
+
+(defun nucleo-completion-tests--context (table &optional pred regexp-list)
+  "Return an interrupt-reuse context for TABLE, PRED, and REGEXP-LIST."
+  (nucleo-completion--completion-context table pred regexp-list))
+
+(defun nucleo-completion-tests--numbered-a-candidates (count)
+  "Return COUNT candidates that all match the pattern \"a\"."
+  (cl-loop for i below count
+           collect (format "a%03d" i)))
 
 (defmacro nucleo-completion-tests--with-mock-candidates (triples &rest body)
   "Stub `nucleo-completion-candidates' in BODY.
@@ -616,6 +626,17 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((nucleo-completion-regexp-only-match-priority 'after))
     (should-not (nucleo-completion--promote-regexp-only-candidate-p "日本語"))))
 
+(ert-deftest nucleo-completion-regexp-only-priority-ignores-tofu-test ()
+  "Internal disambiguation characters must not make ASCII candidates prominent."
+  (let ((nucleo-completion-regexp-only-match-priority 'non-ascii)
+        (tofu (string #x200000)))
+    (should-not
+     (nucleo-completion--promote-regexp-only-candidate-p
+      (concat "org-unrelated" tofu)))
+    (should
+     (nucleo-completion--promote-regexp-only-candidate-p
+      (concat "日本語" tofu)))))
+
 (ert-deftest nucleo-completion-regexp-only-split-skips-fixed-priority-test ()
   (dolist (priority '(before after))
     (let ((nucleo-completion-regexp-only-match-priority priority)
@@ -1104,6 +1125,48 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                     "fb" '("foobar" "fxxx" "foo-baz" "" "fb") nil)
                    '("fb" "foo-baz" "foobar")))))
 
+(ert-deftest nucleo-completion-native-module-interrupts-candidate-list-build-test ()
+  (unless (nucleo-completion--module-ready-p)
+    (ert-skip "Rust module is not available"))
+  (let ((calls 0)
+        (candidates (nucleo-completion-tests--numbered-a-candidates 600)))
+    (cl-letf (((symbol-function 'input-pending-p)
+               (lambda (&optional _check-timers)
+                 (setq calls (1+ calls))
+                 (>= calls 6))))
+      (let ((bundle (nucleo-completion-candidates
+                     "a" candidates nil nil nil 0 nil)))
+        (should (nucleo-completion--bundle-interrupted-p bundle))
+        (should (= calls 6))))))
+
+(ert-deftest nucleo-completion-native-module-interrupts-top-info-build-test ()
+  (unless (nucleo-completion--module-ready-p)
+    (ert-skip "Rust module is not available"))
+  (let ((calls 0)
+        (candidates (nucleo-completion-tests--numbered-a-candidates 300)))
+    (cl-letf (((symbol-function 'input-pending-p)
+               (lambda (&optional _check-timers)
+                 (setq calls (1+ calls))
+                 (>= calls 7))))
+      (let ((bundle (nucleo-completion-candidates
+                     "a" candidates nil nil nil 300 nil)))
+        (should (nucleo-completion--bundle-interrupted-p bundle))
+        (should (= calls 7))))))
+
+(ert-deftest nucleo-completion-native-module-interrupts-full-score-build-test ()
+  (unless (nucleo-completion--module-ready-p)
+    (ert-skip "Rust module is not available"))
+  (let ((calls 0)
+        (candidates (nucleo-completion-tests--numbered-a-candidates 300)))
+    (cl-letf (((symbol-function 'input-pending-p)
+               (lambda (&optional _check-timers)
+                 (setq calls (1+ calls))
+                 (>= calls 8))))
+      (let ((bundle (nucleo-completion-candidates
+                     "a" candidates nil nil nil 0 t)))
+        (should (nucleo-completion--bundle-interrupted-p bundle))
+        (should (= calls 8))))))
+
 (ert-deftest nucleo-completion-native-module-score-property-test ()
   (unless (nucleo-completion--module-ready-p)
     (ert-skip "Rust module is not available"))
@@ -1293,18 +1356,274 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (should (equal nucleo-completion--current-result '("fb"))))))
 
 (ert-deftest nucleo-completion-module-interrupt-reuses-last-result-test ()
-  (let ((completion-ignore-case nil)
-        (nucleo-completion--current-prefix "")
-        (nucleo-completion--current-result '("fb")))
+  (let* ((completion-ignore-case nil)
+         (table '("foo" "bar" "fob"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foo" "fb")))
     (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
                (lambda () t))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (&rest _)
                  (list nucleo-completion--interrupted-sentinel nil nil))))
       (should (equal (nucleo-completion-all-completions
-                      "fo" '("foo" "bar" "fob") nil nil)
-                     '("fb")))
-      (should (equal nucleo-completion--current-result '("fb"))))))
+                      "fo" table nil nil)
+                     '("foo")))
+      (should (equal nucleo-completion--current-result '("foo" "fb"))))))
+
+(ert-deftest nucleo-completion-module-interrupt-skips-shorter-pattern-reuse-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("foo" "fob" "bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "foo")
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foo")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should-not (nucleo-completion-all-completions
+                   "fo" table nil nil))
+      (should (equal nucleo-completion--current-result '("foo"))))))
+
+(ert-deftest nucleo-completion-current-pattern-refinement-skips-regexp-functions-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-regexp-functions (list #'identity))
+        (nucleo-completion--current-pattern "f"))
+    (should (nucleo-completion--current-pattern-refinement-p "f"))
+    (should-not (nucleo-completion--current-pattern-refinement-p "fo"))))
+
+(ert-deftest nucleo-completion-all-completions-while-no-input-reuses-last-result-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("foo" "bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foo"))
+         (unread-command-events (list ?x)))
+    (should (equal (nucleo-completion-all-completions
+                    "fo" table nil nil)
+                   '("foo")))))
+
+(ert-deftest nucleo-completion-all-completions-interrupt-refreshes-lazy-highlight-test ()
+  (let ((completion-ignore-case nil)
+        (completion-lazy-hilit t)
+        (table '("foo" "fob" "bar")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil)))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "f" table nil nil))
+                     '("foo" "fob")))
+      (let ((old-highlight completion-lazy-hilit-fn)
+            (unread-command-events (list ?x)))
+        (should (equal (nucleo-completion-all-completions
+                        "fb" table nil nil)
+                       '("fob")))
+        (should-not (eq completion-lazy-hilit-fn old-highlight))
+        (let ((highlighted (funcall completion-lazy-hilit-fn "fob")))
+          (should (memq 'completions-common-part
+                        (ensure-list (get-text-property
+                                      0 'face highlighted))))
+          (should-not (get-text-property 1 'face highlighted))
+          (should (memq 'completions-common-part
+                        (ensure-list (get-text-property
+                                      2 'face highlighted)))))))))
+
+(ert-deftest nucleo-completion-all-completions-interrupt-skips-table-mismatch-test ()
+  (let* ((completion-ignore-case nil)
+         (old-table '("foo"))
+         (new-table '("bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context old-table))
+         (nucleo-completion--current-result '("foo"))
+         (unread-command-events (list ?x)))
+    (should-not (nucleo-completion-all-completions
+                 "fo" new-table nil nil))))
+
+(ert-deftest nucleo-completion-all-completions-interrupt-skips-regexp-list-mismatch-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("foo"))
+         (completion-regexp-list '("bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table nil nil))
+         (nucleo-completion--current-result '("foo"))
+         (unread-command-events (list ?x)))
+    (should-not (nucleo-completion-all-completions
+                 "fo" table nil nil))))
+
+(ert-deftest nucleo-completion-all-completions-interrupt-skips-prefix-mismatch-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion--current-prefix "old/")
+        (nucleo-completion--current-pattern "fo")
+        (nucleo-completion--current-base-size nil)
+        (nucleo-completion--current-result '("stale"))
+        (unread-command-events (list ?x)))
+    (cl-labels ((table (_string _pred action)
+                  (cond
+                   ((eq (car-safe action) 'boundaries)
+                    (cons 'boundaries (cons (length "new/") 0)))
+                   ((eq action t) '("foo"))
+                   ((eq action 'metadata) nil)
+                   ((eq action nil) nil))))
+      (should-not (nucleo-completion-all-completions
+                   "new/fo" #'table nil (length "new/fo"))))))
+
+(ert-deftest nucleo-completion-all-completions-module-interrupt-filters-last-result-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("zoo" "bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "z")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("zoo")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should-not (nucleo-completion-all-completions
+                   "zz" table nil nil))
+      (should (equal nucleo-completion--current-result '("zoo"))))))
+
+(ert-deftest nucleo-completion-all-completions-interrupt-preserves-ranked-order-test ()
+  (let* ((completion-ignore-case nil)
+         (nucleo-completion-sort-ties-by-length t)
+         (nucleo-completion-sort-ties-by-history nil)
+         (nucleo-completion-sort-ties-alphabetically nil)
+         (table '("fb" "foobar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foobar" "fb")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should (equal (nucleo-completion-all-completions
+                      "fb" table nil nil)
+                     '("foobar" "fb"))))))
+
+(ert-deftest nucleo-completion-try-module-interrupt-reuses-last-result-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("foo bar" "bar foo"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "fo b")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foo bar")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should (equal (nucleo-completion-try-completion
+                      "fo ba" table nil nil)
+                     '("foo bar" . 7)))
+      (should (equal nucleo-completion--current-result '("foo bar"))))))
+
+(ert-deftest nucleo-completion-try-interrupt-skips-shorter-pattern-reuse-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("foo bar" "fob bang" "bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "foo bar")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foo bar")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should-not (nucleo-completion-try-completion
+                   "fo ba" table nil nil))
+      (should (equal nucleo-completion--current-result '("foo bar"))))))
+
+(ert-deftest nucleo-completion-try-while-no-input-reuses-last-result-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("foo" "bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foo"))
+         (unread-command-events (list ?x)))
+    (should (equal (nucleo-completion-try-completion
+                    "fo" table nil nil)
+                   '("foo" . 3)))))
+
+(ert-deftest nucleo-completion-try-interrupt-skips-table-mismatch-test ()
+  (let* ((completion-ignore-case nil)
+         (old-table '("foo"))
+         (new-table '("bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context old-table))
+         (nucleo-completion--current-result '("foo"))
+         (unread-command-events (list ?x)))
+    (should-not (nucleo-completion-try-completion
+                 "fo" new-table nil nil))))
+
+(ert-deftest nucleo-completion-try-module-interrupt-filters-last-result-test ()
+  (let* ((completion-ignore-case nil)
+         (table '("zoo" "bar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "z")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("zoo")))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should-not (nucleo-completion-try-completion
+                   "zz" table nil nil))
+      (should (equal nucleo-completion--current-result '("zoo"))))))
+
+(ert-deftest nucleo-completion-try-interrupt-preserves-ranked-order-test ()
+  (let* ((completion-ignore-case nil)
+         (nucleo-completion-sort-ties-by-length t)
+         (nucleo-completion-sort-ties-by-history nil)
+         (nucleo-completion-sort-ties-alphabetically nil)
+         (table '("fb" "foobar"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size nil)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foobar" "fb"))
+         seen-candidates)
+    (cl-letf (((symbol-function 'nucleo-completion--try-result)
+               (lambda (_string _point _prefix _pattern _suffix candidates)
+                 (setq seen-candidates candidates)
+                 t)))
+      (should (eq (nucleo-completion--try-completion-interrupted-result
+                   "fb" table nil nil)
+                  t))
+      (should (equal seen-candidates '("foobar" "fb"))))))
 
 (ert-deftest nucleo-completion-current-result-stays-unhighlighted-test ()
   "Interrupt reuse stores filtered candidates before display highlighting."
@@ -1323,6 +1642,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (let ((all (nucleo-completion-all-completions
                   "fo" '("foo" "fob" "bar") nil nil)))
         (should (get-text-property 0 'face (car all)))
+        (should (equal nucleo-completion--current-pattern "fo"))
         (should (equal nucleo-completion--current-result
                        '("foo" "fob")))
         (should-not (get-text-property
@@ -1353,11 +1673,15 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((completion-lazy-hilit t)
         (completion-lazy-hilit-fn (lambda (_candidate) "stale"))
         (nucleo-completion--filtering-p t)
+        (nucleo-completion--current-pattern "stale")
+        (nucleo-completion--current-context 'stale)
         (nucleo-completion--current-result '("stale")))
     (should (equal (nucleo-completion-all-completions
                     "" '("foo" "bar") nil 0)
                    '("foo" "bar")))
     (should-not nucleo-completion--filtering-p)
+    (should-not nucleo-completion--current-pattern)
+    (should-not nucleo-completion--current-context)
     (should-not nucleo-completion--current-result)
     (should-not completion-lazy-hilit-fn)))
 
@@ -1365,11 +1689,15 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((completion-lazy-hilit t)
         (completion-lazy-hilit-fn (lambda (_candidate) "stale"))
         (nucleo-completion--filtering-p t)
+        (nucleo-completion--current-pattern "stale")
+        (nucleo-completion--current-context 'stale)
         (nucleo-completion--current-result '("stale")))
     (cl-letf (((symbol-function
                 'nucleo-completion--initial-completion-candidates)
                (lambda (_prefix _needle _table _pred _regexp-list)
                  (should-not nucleo-completion--filtering-p)
+                 (should-not nucleo-completion--current-pattern)
+                 (should-not nucleo-completion--current-context)
                  (should-not nucleo-completion--current-result)
                  (should-not completion-lazy-hilit-fn)
                  '("foo"))))
@@ -1393,11 +1721,15 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 (ert-deftest nucleo-completion-try-empty-input-clears-state-test ()
   (let ((completion-lazy-hilit-fn (lambda (_candidate) "stale"))
         (nucleo-completion--filtering-p t)
+        (nucleo-completion--current-pattern "stale")
+        (nucleo-completion--current-context 'stale)
         (nucleo-completion--current-result '("stale")))
     (should (equal (nucleo-completion-try-completion
                     "" '("foo" "bar") nil 0)
                    '("" . 0)))
     (should-not nucleo-completion--filtering-p)
+    (should-not nucleo-completion--current-pattern)
+    (should-not nucleo-completion--current-context)
     (should-not nucleo-completion--current-result)
     (should-not completion-lazy-hilit-fn)))
 
@@ -1418,14 +1750,18 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((completion-lazy-hilit-fn (lambda (_candidate) "stale"))
         (nucleo-completion--filtering-p t)
         (nucleo-completion--current-prefix "old")
+        (nucleo-completion--current-pattern "stale")
         (nucleo-completion--current-base-size 0)
+        (nucleo-completion--current-context 'stale)
         (nucleo-completion--current-result '("stale")))
     (should (equal (nucleo-completion-try-completion
                     "fo" '("foo" "fob" "bar") nil 2)
                    '("fo" . 2)))
     (should nucleo-completion--filtering-p)
     (should (equal nucleo-completion--current-prefix ""))
+    (should-not nucleo-completion--current-pattern)
     (should-not nucleo-completion--current-base-size)
+    (should-not nucleo-completion--current-context)
     (should-not nucleo-completion--current-result)
     (should-not completion-lazy-hilit-fn)))
 
@@ -1488,10 +1824,14 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                    "fo" '("foo" "fob") nil nil)))))
 
 (ert-deftest nucleo-completion-interrupt-preserves-base-size-test ()
-  (let ((completion-ignore-case nil)
-        (nucleo-completion--current-prefix "")
-        (nucleo-completion--current-base-size 0)
-        (nucleo-completion--current-result '("foo")))
+  (let* ((completion-ignore-case nil)
+         (table '("foo" "fob"))
+         (nucleo-completion--current-prefix "")
+         (nucleo-completion--current-pattern "f")
+         (nucleo-completion--current-base-size 0)
+         (nucleo-completion--current-context
+          (nucleo-completion-tests--context table))
+         (nucleo-completion--current-result '("foo")))
     (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
                (lambda () t))
               ((symbol-function 'nucleo-completion-candidates)
@@ -1500,7 +1840,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
       (pcase-let ((`(,candidates . ,base-size)
                    (nucleo-completion--split-base-size
                     (nucleo-completion-all-completions
-                     "fo" '("foo" "fob") nil nil))))
+                     "fo" table nil nil))))
         (should (equal candidates '("foo")))
         (should (= base-size 0))))))
 

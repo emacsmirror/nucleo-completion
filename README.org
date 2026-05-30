@@ -25,7 +25,8 @@ Install from MELPA:
   M-x package-install RET nucleo-completion RET
 #+end_src
 
-Or install directly from the repository with ~package-vc~:
+On Emacs 29 or newer, you can also install directly from the repository with
+~package-vc~:
 
 #+begin_src emacs-lisp
   (package-vc-install
@@ -40,24 +41,22 @@ Then enable the completion style:
   (add-to-list 'completion-styles 'nucleo)
 #+end_src
 
-Or configure it with ~use-package~:
+Or configure it with ~use-package~ after installing it:
 
 #+begin_src emacs-lisp
   (use-package nucleo-completion
-    :vc (:url "https://github.com/kn66/nucleo-completion.el.git"
-         :rev :newest)
     :config
     ;; Optional: install and load the Rust module when it is missing.
     (nucleo-completion-ensure-module)
 
-    (setopt completion-styles '(nucleo basic))
+    (setq completion-styles '(nucleo basic))
     (add-to-list 'completion-category-overrides
                  '(eglot-capf (styles nucleo basic)))
 
-    (setopt nucleo-completion-sort-ties-by-length t
-            nucleo-completion-sort-ties-alphabetically t
-            nucleo-completion-sort-ties-by-history t
-            nucleo-completion-highlight-score-bands t))
+    (setq nucleo-completion-sort-ties-by-length t
+          nucleo-completion-sort-ties-alphabetically t
+          nucleo-completion-sort-ties-by-history t
+          nucleo-completion-highlight-score-bands t))
 #+end_src
 
 The package works without a Rust dynamic module by using a simple Emacs Lisp
@@ -116,7 +115,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.14")
+  (setq nucleo-completion-module-release-tag "v0.1.15")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -171,17 +170,13 @@ release artifacts named
 - ~x86_64-pc-windows-msvc~
 
 Run the workflow manually with the release tag matching the package version,
-for example ~v0.1.14~, to upload assets to an existing GitHub Release.  The
+for example ~v0.1.15~, to upload assets to an existing GitHub Release.  The
 workflow checks that the tag matches both the Cargo package version and
 ~nucleo-completion-required-module-version~, then runs the same Rust and Elisp
-verification gates as CI before building release assets.  Linux binaries are
-sensitive to libc compatibility; for broad Linux distribution, consider adding
-a musl release asset.
-
-* Specification
-
-Behavior and verification details are maintained in
-~spec/nucleo-completion.org~.
+verification gates as CI before building release assets.  Each platform build
+also loads its produced module in Emacs and runs a small scoring check before
+uploading the artifact.  Linux binaries are sensitive to libc compatibility;
+for broad Linux distribution, consider adding a musl release asset.
 
 * Performance
 
@@ -203,6 +198,21 @@ It includes results for ~nucleo~ alongside other Emacs completion styles such
 as ~hotfuzz~, ~fussy~, ~orderless~, and ~flex~.
 
 * Configuration
+
+** Non-Unicode Candidates
+
+Some completion frontends append internal disambiguation characters above
+Unicode's maximum codepoint.  The Rust module cannot receive those strings
+directly as UTF-8.  If a module call reports a ~unicode-string-p~ error, Nucleo
+retries that call once after stripping those internal characters and restoring
+the original candidates on return.
+
+When a frontend regularly returns such candidates, enable scrubbing up front to
+avoid the failed first module call:
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-scrub-non-unicode-candidates t)
+#+end_src
 
 ** Tie Sorting
 

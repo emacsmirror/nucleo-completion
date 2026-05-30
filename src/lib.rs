@@ -68,6 +68,7 @@ struct MatchIndicesScratch {
 }
 
 const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const INPUT_PENDING_CHECK_INTERVAL: usize = 256;
 
 #[derive(Clone, Copy)]
 struct SortOptions {
@@ -128,9 +129,10 @@ fn collect_history_ranks<'e>(history_ranks: Value<'e>) -> Result<Vec<Option<usiz
 }
 
 fn score_lisp_candidates<'e>(
+    env: &Env,
     pattern: &Pattern,
     candidates: Value<'e>,
-) -> Result<Vec<ScoredCandidate<'e>>> {
+) -> Result<Option<Vec<ScoredCandidate<'e>>>> {
     with_matcher(|matcher| {
         let mut matches = Vec::new();
         let mut list = candidates;
@@ -147,9 +149,12 @@ fn score_lisp_candidates<'e>(
             }
             list = list.cdr()?;
             index += 1;
+            if input_pending_check_due(index) && input_pending(env)? {
+                return Ok(None);
+            }
         }
 
-        Ok(matches)
+        Ok(Some(matches))
     })
 }
 
@@ -180,11 +185,12 @@ fn compare_scored_candidates(a: &ScoredCandidate, b: &ScoredCandidate) -> Orderi
 }
 
 fn score_lisp_candidates_with_ties<'e>(
+    env: &Env,
     pattern: &Pattern,
     candidates: Value<'e>,
     sort_options: SortOptions,
     history_ranks: Option<&[Option<usize>]>,
-) -> Result<Vec<ScoredCandidateWithTies<'e>>> {
+) -> Result<Option<Vec<ScoredCandidateWithTies<'e>>>> {
     with_matcher(|matcher| {
         let mut matches = Vec::new();
         let mut list = candidates;
@@ -208,9 +214,12 @@ fn score_lisp_candidates_with_ties<'e>(
             }
             list = list.cdr()?;
             index += 1;
+            if input_pending_check_due(index) && input_pending(env)? {
+                return Ok(None);
+            }
         }
 
-        Ok(matches)
+        Ok(Some(matches))
     })
 }
 
@@ -355,6 +364,14 @@ fn input_pending(env: &Env) -> Result<bool> {
     Ok(env.call("input-pending-p", args)?.is_not_nil())
 }
 
+fn input_pending_check_due(processed_count: usize) -> bool {
+    processed_count.checked_rem(INPUT_PENDING_CHECK_INTERVAL) == Some(0)
+}
+
+fn interrupt_after_processed(env: &Env, processed_count: usize) -> Result<bool> {
+    Ok(input_pending_check_due(processed_count) && input_pending(env)?)
+}
+
 fn build_list_3<'e>(env: &'e Env, a: Value<'e>, b: Value<'e>, c: Value<'e>) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
     env.cons(a, env.cons(b, env.cons(c, nil)?)?)
@@ -366,16 +383,21 @@ fn interrupted_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
     build_list_3(env, sentinel, nil, nil)
 }
 
-fn build_scored_candidate_list<'e, T>(env: &'e Env, matches: &[T]) -> Result<Value<'e>>
+fn build_scored_candidate_list<'e, T>(env: &'e Env, matches: &[T]) -> Result<Option<Value<'e>>>
 where
     T: ScoredCandidateEntry<'e>,
 {
     let nil = env.intern("nil")?;
     let mut candidates_list = nil;
+    let mut processed_count = 0;
     for scored in matches.iter().rev() {
         candidates_list = env.cons(scored.value(), candidates_list)?;
+        processed_count += 1;
+        if interrupt_after_processed(env, processed_count)? {
+            return Ok(None);
+        }
     }
-    Ok(candidates_list)
+    Ok(Some(candidates_list))
 }
 
 fn build_scored_top_info<'e, T>(
@@ -383,13 +405,14 @@ fn build_scored_top_info<'e, T>(
     pattern: &Pattern,
     matches: &[T],
     highlight_limit: usize,
-) -> Result<Value<'e>>
+) -> Result<Option<Value<'e>>>
 where
     T: ScoredCandidateEntry<'e>,
 {
     let nil = env.intern("nil")?;
     let mut top_info = nil;
     let mut scratch = MatchIndicesScratch::default();
+    let mut processed_count = 0;
     for scored in matches.iter().take(highlight_limit).rev() {
         let value = scored.value();
         let text: String = value.into_rust()?;
@@ -407,28 +430,37 @@ where
             )?,
         )?;
         top_info = env.cons(entry, top_info)?;
+        processed_count += 1;
+        if interrupt_after_processed(env, processed_count)? {
+            return Ok(None);
+        }
     }
-    Ok(top_info)
+    Ok(Some(top_info))
 }
 
 fn build_scored_full_scores<'e, T>(
     env: &'e Env,
     matches: &[T],
     return_all_scores: bool,
-) -> Result<Value<'e>>
+) -> Result<Option<Value<'e>>>
 where
     T: ScoredCandidateEntry<'e>,
 {
     let nil = env.intern("nil")?;
     if !return_all_scores {
-        return Ok(nil);
+        return Ok(Some(nil));
     }
 
     let mut full_scores = nil;
+    let mut processed_count = 0;
     for scored in matches.iter().rev() {
         full_scores = env.cons(scored.score().into_lisp(env)?, full_scores)?;
+        processed_count += 1;
+        if interrupt_after_processed(env, processed_count)? {
+            return Ok(None);
+        }
     }
-    Ok(full_scores)
+    Ok(Some(full_scores))
 }
 
 fn build_scored_candidate_bundle<'e, T>(
@@ -441,9 +473,24 @@ fn build_scored_candidate_bundle<'e, T>(
 where
     T: ScoredCandidateEntry<'e>,
 {
-    let candidates_list = build_scored_candidate_list(env, matches)?;
-    let top_info = build_scored_top_info(env, pattern, matches, highlight_limit)?;
-    let full_scores = build_scored_full_scores(env, matches, return_all_scores)?;
+    let Some(candidates_list) = build_scored_candidate_list(env, matches)? else {
+        return interrupted_bundle(env);
+    };
+    if input_pending(env)? {
+        return interrupted_bundle(env);
+    }
+    let Some(top_info) = build_scored_top_info(env, pattern, matches, highlight_limit)? else {
+        return interrupted_bundle(env);
+    };
+    if input_pending(env)? {
+        return interrupted_bundle(env);
+    }
+    let Some(full_scores) = build_scored_full_scores(env, matches, return_all_scores)? else {
+        return interrupted_bundle(env);
+    };
+    if input_pending(env)? {
+        return interrupted_bundle(env);
+    }
     build_list_3(env, candidates_list, top_info, full_scores)
 }
 
@@ -474,12 +521,22 @@ fn candidates_impl<'e>(
     let highlight_limit = highlight_limit.into_rust::<usize>()?;
     let return_all_scores = return_all_scores.is_not_nil();
     if needs_candidate_tie_data(sort_options, history_ranks.as_deref()) {
-        let matches = sort_scored_candidates_with_ties(score_lisp_candidates_with_ties(
+        let matches = match score_lisp_candidates_with_ties(
+            env,
             &pattern,
             candidates,
             sort_options,
             history_ranks.as_deref(),
-        )?);
+        )? {
+            Some(matches) => matches,
+            None => return interrupted_bundle(env),
+        };
+
+        if input_pending(env)? {
+            return interrupted_bundle(env);
+        }
+
+        let matches = sort_scored_candidates_with_ties(matches);
 
         if input_pending(env)? {
             return interrupted_bundle(env);
@@ -487,7 +544,16 @@ fn candidates_impl<'e>(
 
         build_scored_candidate_bundle(env, &pattern, &matches, highlight_limit, return_all_scores)
     } else {
-        let matches = sort_scored_candidates(score_lisp_candidates(&pattern, candidates)?);
+        let matches = match score_lisp_candidates(env, &pattern, candidates)? {
+            Some(matches) => matches,
+            None => return interrupted_bundle(env),
+        };
+
+        if input_pending(env)? {
+            return interrupted_bundle(env);
+        }
+
+        let matches = sort_scored_candidates(matches);
 
         if input_pending(env)? {
             return interrupted_bundle(env);
@@ -699,5 +765,13 @@ mod tests {
 
         assert_eq!(first, Some(vec![1, 2, 3]));
         assert_eq!(second, Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn input_pending_check_due_runs_at_interval() {
+        assert!(!input_pending_check_due(1));
+        assert!(!input_pending_check_due(INPUT_PENDING_CHECK_INTERVAL - 1));
+        assert!(input_pending_check_due(INPUT_PENDING_CHECK_INTERVAL));
+        assert!(input_pending_check_due(INPUT_PENDING_CHECK_INTERVAL * 2));
     }
 }
